@@ -1,7 +1,6 @@
 package ru.embroidery.shop.order
 
 import jakarta.validation.Valid
-import org.springframework.context.annotation.Profile
 import org.springframework.http.HttpStatus
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.stereotype.Service
@@ -28,6 +27,8 @@ class Orders(
     private val products: ProductRepository,
     private val deliveries: OrderDeliveryRepository,
     private val files: OrderFileRepository,
+    private val payments: PaymentRepository,
+    private val history: OrderHistory,
     private val mail: ShopMail
 ) {
     fun createDraft(input: NewDraft) = DraftCreated(
@@ -56,6 +57,11 @@ class Orders(
         return orders.listSubmitted(page, type, status, term)
     }
 
+    fun history(id: UUID, page: Pagination): Page<OrderEvent> {
+        orders.get(id)
+        return history.list(id, page)
+    }
+
     @Transactional
     fun submit(actor: Actor, id: UUID): OrderDetails {
         requireCustomer(actor, id)
@@ -70,14 +76,13 @@ class Orders(
     }
 
     @Transactional
-    fun quote(id: UUID, quote: Quote): OrderDetails {
+    fun quote(actor: Actor, id: UUID, quote: Quote): OrderDetails {
         val order = orders.lock(id)
         order.requireType(OrderType.CUSTOM_PHOTO)
         order.requireStatus(OrderStatus.IN_REVIEW)
         orders.setQuote(id, quote)
-        // The first payment gets the extra kopeck when the total is odd.
-        val deposit = quote.itemKopecks / 2 + quote.itemKopecks % 2
-        orders.addPayment(id, Installment.DEPOSIT, deposit)
+        history.record(id, OrderAction.QUOTED, actor.email,
+            mapOf("itemKopecks" to quote.itemKopecks, "productionDays" to quote.productionDays))
         mail.notifyCustomer(id, order.email, "Цена и срок заказа готовы")
         return snapshot(id)
     }
@@ -124,17 +129,14 @@ class Orders(
     @Transactional
     fun completeProduction(id: UUID): OrderDetails {
         val order = orders.lock(id)
-        when (order.type) {
-            OrderType.CUSTOM_PHOTO -> {
-                order.requireStatus(OrderStatus.IN_PRODUCTION)
-                orders.setStatus(id, OrderStatus.AWAITING_DELIVERY_QUOTE)
-                mail.notifyCustomer(id, order.email, "Вышивка готова")
-            }
-            OrderType.CATALOG -> {
-                order.requireStatus(OrderStatus.PREPARING_ORDER)
-                orders.setStatus(id, OrderStatus.READY_TO_SHIP)
-            }
+        val workStatus = when (order.type) {
+            OrderType.CUSTOM_PHOTO -> OrderStatus.IN_PRODUCTION
+            OrderType.CATALOG -> OrderStatus.PREPARING_ORDER
         }
+        order.requireStatus(workStatus)
+        payments.requireConfirmed(order)
+        orders.setStatus(id, OrderStatus.READY_TO_SHIP)
+        mail.notifyCustomer(id, order.email, "Заказ готов к отправке")
         return snapshot(id)
     }
 
@@ -144,80 +146,49 @@ class Orders(
         val order = orders.lock(id)
         when (order.type) {
             OrderType.CATALOG -> order.requireStatus(OrderStatus.DRAFT, OrderStatus.IN_REVIEW)
-            OrderType.CUSTOM_PHOTO -> order.requireStatus(
-                OrderStatus.AWAITING_DEPOSIT, OrderStatus.PREPARING_SKETCH, OrderStatus.SKETCH_REVIEW,
-                OrderStatus.CHANGES_REQUESTED, OrderStatus.IN_PRODUCTION, OrderStatus.AWAITING_DELIVERY_QUOTE
-            )
+            OrderType.CUSTOM_PHOTO -> order.requireStatus(OrderStatus.IN_REVIEW, OrderStatus.AWAITING_DELIVERY_QUOTE)
         }
         deliveries.saveContact(id, contact.normalized())
         return snapshot(id)
     }
 
     @Transactional
-    fun quoteDelivery(id: UUID, quote: DeliveryQuote): OrderDetails {
+    fun quoteDelivery(actor: Actor, id: UUID, quote: DeliveryQuote): OrderDetails {
         val order = orders.lock(id)
-        when (order.type) {
-            OrderType.CATALOG -> order.requireStatus(OrderStatus.IN_REVIEW)
-            OrderType.CUSTOM_PHOTO -> order.requireStatus(OrderStatus.AWAITING_DELIVERY_QUOTE)
+        val quoteStatus = when (order.type) {
+            OrderType.CATALOG -> OrderStatus.IN_REVIEW
+            OrderType.CUSTOM_PHOTO -> OrderStatus.AWAITING_DELIVERY_QUOTE
         }
+        order.requireStatus(quoteStatus)
         val total = requireNotNull(order.itemKopecks) + quote.priceKopecks
         if (total > MAX_KOPECKS) badRequest("Order total exceeds the supported amount")
         deliveries.setQuote(id, quote)
-        when (order.type) {
-            OrderType.CATALOG -> {
-                orders.addPayment(id, Installment.FULL, total)
-                orders.setStatus(id, OrderStatus.AWAITING_PAYMENT)
-                mail.notifyCustomer(id, order.email, "Заказ готов к оплате")
-            }
-            OrderType.CUSTOM_PHOTO -> {
-                val deposit = orders.payments(id).single { it.installment == Installment.DEPOSIT }
-                orders.addPayment(id, Installment.BALANCE, total - deposit.amountKopecks)
-                orders.setStatus(id, OrderStatus.AWAITING_BALANCE)
-                mail.notifyCustomer(id, order.email, "Заказ готов к доплате")
-            }
-        }
+        payments.create(id, total)
+        orders.setStatus(id, OrderStatus.AWAITING_PAYMENT)
+        history.record(id, OrderAction.DELIVERY_QUOTED, actor.email, mapOf(
+            "deliveryKopecks" to quote.priceKopecks, "deliveryDays" to quote.deliveryDays, "totalKopecks" to total
+        ))
+        mail.notifyCustomer(id, order.email, "Заказ готов к оплате")
         return snapshot(id)
     }
 
     @Transactional
-    fun reject(id: UUID, reason: String): OrderDetails {
+    fun reject(actor: Actor, id: UUID, reason: String): OrderDetails {
         val order = orders.lock(id)
         order.requireStatus(OrderStatus.IN_REVIEW)
         orders.reject(id, reason)
+        history.record(id, OrderAction.REJECTED, actor.email, mapOf("reason" to reason))
         mail.notifyCustomer(id, order.email, "Заявка отклонена")
         return snapshot(id)
     }
 
     @Transactional
-    fun confirmTestPayment(id: UUID, paymentId: UUID): OrderDetails {
-        val order = orders.lock(id)
-        val payment = orders.payments(id).find { it.id == paymentId }
-            ?: throw ApiFailure(HttpStatus.NOT_FOUND, "Payment not found")
-        if (payment.paidAt != null) return snapshot(id)
-        val nextStatus = when (payment.installment) {
-            Installment.DEPOSIT -> {
-                order.requireStatus(OrderStatus.AWAITING_DEPOSIT)
-                OrderStatus.PREPARING_SKETCH
-            }
-            Installment.BALANCE -> {
-                order.requireStatus(OrderStatus.AWAITING_BALANCE)
-                OrderStatus.READY_TO_SHIP
-            }
-            Installment.FULL -> {
-                order.requireStatus(OrderStatus.AWAITING_PAYMENT)
-                OrderStatus.PREPARING_ORDER
-            }
-        }
-        orders.markPaid(paymentId)
-        orders.setStatus(id, nextStatus)
-        return snapshot(id)
-    }
-
-    @Transactional
-    fun ship(id: UUID, trackingNumber: String): OrderDetails {
+    fun ship(actor: Actor, id: UUID, trackingNumber: String): OrderDetails {
         val order = orders.lock(id)
         order.requireStatus(OrderStatus.READY_TO_SHIP)
+        payments.requireConfirmed(order)
         orders.setShipped(id, trackingNumber)
+        history.record(id, OrderAction.SHIPPED, actor.email, mapOf("trackingNumber" to trackingNumber))
         mail.notifyCustomer(id, order.email, "Заказ отправлен")
         return snapshot(id)
     }
@@ -230,7 +201,7 @@ class Orders(
             delivery = deliveries.get(id),
             sourceFileIds = orders.sources(id),
             sketch = orders.latestSketch(id),
-            payments = orders.payments(id)
+            payment = payments.details(order)
         )
     }
 
@@ -289,14 +260,25 @@ class OrderController(private val orders: Orders) {
     @GetMapping("/api/staff/orders/{id}")
     fun staffDetails(@AuthenticationPrincipal actor: Actor, @PathVariable id: UUID) = orders.details(actor, id)
 
+    @GetMapping("/api/staff/orders/{id}/history")
+    fun history(
+        @PathVariable id: UUID,
+        @RequestParam(defaultValue = "0") page: Int,
+        @RequestParam(defaultValue = "24") size: Int
+    ) = orders.history(id, Pagination(page, size))
+
     @PostMapping("/api/staff/orders/{id}/quote")
-    fun quote(@PathVariable id: UUID, @Valid @RequestBody input: Quote) = orders.quote(id, input)
+    fun quote(@AuthenticationPrincipal actor: Actor, @PathVariable id: UUID, @Valid @RequestBody input: Quote) =
+        orders.quote(actor, id, input)
 
     @PostMapping("/api/staff/orders/{id}/delivery-quote")
-    fun quoteDelivery(@PathVariable id: UUID, @Valid @RequestBody input: DeliveryQuote) = orders.quoteDelivery(id, input)
+    fun quoteDelivery(
+        @AuthenticationPrincipal actor: Actor, @PathVariable id: UUID, @Valid @RequestBody input: DeliveryQuote
+    ) = orders.quoteDelivery(actor, id, input)
 
     @PostMapping("/api/staff/orders/{id}/reject")
-    fun reject(@PathVariable id: UUID, @Valid @RequestBody input: Rejection) = orders.reject(id, input.reason.trim())
+    fun reject(@AuthenticationPrincipal actor: Actor, @PathVariable id: UUID, @Valid @RequestBody input: OrderReason) =
+        orders.reject(actor, id, input.reason.trim())
 
     @PostMapping("/api/staff/orders/{id}/sketches")
     fun sketch(@PathVariable id: UUID, @RequestBody input: PublishSketch) = orders.publishSketch(id, input.fileId)
@@ -305,12 +287,6 @@ class OrderController(private val orders: Orders) {
     fun productionComplete(@PathVariable id: UUID) = orders.completeProduction(id)
 
     @PostMapping("/api/staff/orders/{id}/shipment")
-    fun ship(@PathVariable id: UUID, @Valid @RequestBody input: Shipment) = orders.ship(id, input.trackingNumber.trim())
-}
-
-@Profile("local")
-@RestController
-class TestPaymentController(private val orders: Orders) {
-    @PostMapping("/api/staff/orders/{id}/test-payments/{paymentId}/confirm")
-    fun confirm(@PathVariable id: UUID, @PathVariable paymentId: UUID) = orders.confirmTestPayment(id, paymentId)
+    fun ship(@AuthenticationPrincipal actor: Actor, @PathVariable id: UUID, @Valid @RequestBody input: Shipment) =
+        orders.ship(actor, id, input.trackingNumber.trim())
 }

@@ -27,9 +27,9 @@ class OrderRepository(private val db: JdbcClient) {
             status = OrderStatus.valueOf(rs.getString("status")),
             itemKopecks = rs.getObject("item_kopecks", Long::class.javaObjectType),
             productionDays = rs.getObject("production_days", Int::class.javaObjectType),
-            estimatedDeliveryDays = rs.getObject("estimated_delivery_days", Int::class.javaObjectType),
             trackingNumber = rs.getString("tracking_number"),
             rejectionReason = rs.getString("rejection_reason"),
+            cancellationReason = rs.getString("cancellation_reason"),
             createdAt = rs.getObject("created_at", OffsetDateTime::class.java)
         )
     }
@@ -108,16 +108,22 @@ class OrderRepository(private val db: JdbcClient) {
 
     fun setQuote(id: UUID, quote: Quote) {
         db.sql("""
-            UPDATE orders SET item_kopecks = :amount, production_days = :days, estimated_delivery_days = :estimate,
-                              status = 'AWAITING_DEPOSIT', updated_at = now()
+            UPDATE orders SET item_kopecks = :amount, production_days = :days,
+                              status = 'AWAITING_DELIVERY_QUOTE', updated_at = now()
             WHERE id = :id
-        """).param("id", id).param("amount", quote.itemKopecks).param("days", quote.productionDays)
-            .param("estimate", quote.estimatedDeliveryDays).update()
+        """).param("id", id).param("amount", quote.itemKopecks).param("days", quote.productionDays).update()
     }
 
     fun reject(id: UUID, reason: String) {
         db.sql("""
             UPDATE orders SET status = 'REJECTED', rejection_reason = :reason, updated_at = now() WHERE id = :id
+        """).param("id", id).param("reason", reason).update()
+    }
+
+    fun requestCancellation(id: UUID, reason: String) {
+        db.sql("""
+            UPDATE orders SET status = 'CANCELLATION_REQUESTED', cancellation_reason = :reason, updated_at = now()
+            WHERE id = :id
         """).param("id", id).param("reason", reason).update()
     }
 
@@ -149,25 +155,4 @@ class OrderRepository(private val db: JdbcClient) {
         db.sql("UPDATE sketches SET approved_at = now() WHERE id = :id").param("id", id).update()
     }
 
-    fun addPayment(orderId: UUID, installment: Installment, amount: Long) {
-        db.sql("""
-            INSERT INTO order_payments (id, order_id, installment, amount_kopecks)
-            VALUES (:id, :order, :installment, :amount)
-        """).param("id", UUID.randomUUID()).param("order", orderId).param("installment", installment.name)
-            .param("amount", amount).update()
-    }
-
-    fun payments(orderId: UUID): List<Payment> = db.sql("""
-        SELECT id, installment, amount_kopecks, paid_at FROM order_payments
-        WHERE order_id = :id ORDER BY CASE installment WHEN 'DEPOSIT' THEN 0 ELSE 1 END
-    """).param("id", orderId).query { rs, _ ->
-        Payment(
-            rs.getObject("id", UUID::class.java), Installment.valueOf(rs.getString("installment")),
-            rs.getLong("amount_kopecks"), rs.getObject("paid_at", OffsetDateTime::class.java)
-        )
-    }.list()
-
-    fun markPaid(id: UUID) {
-        db.sql("UPDATE order_payments SET paid_at = now() WHERE id = :id").param("id", id).update()
-    }
 }

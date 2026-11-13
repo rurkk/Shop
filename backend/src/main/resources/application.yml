@@ -69,6 +69,11 @@ shop:
   staff-emails: ${SHOP_STAFF_EMAILS}
   code-secret: ${SHOP_CODE_SECRET}
   mail-from: ${SHOP_MAIL_FROM}
+  yookassa:
+    enabled: ${SHOP_YOOKASSA_ENABLED:false}
+    shop-id: ${SHOP_YOOKASSA_SHOP_ID:}
+    secret-key: ${SHOP_YOOKASSA_SECRET_KEY:}
+    public-origin: ${SHOP_PUBLIC_ORIGIN:}
   storage:
     endpoint: ${SHOP_S3_ENDPOINT}
     bucket: ${SHOP_S3_BUCKET}

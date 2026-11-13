@@ -75,6 +75,11 @@ class CatalogImageRepository(private val db: JdbcClient) {
                 JOIN catalog_products cp ON cp.product_id = p.id JOIN catalogs c ON c.id = cp.catalog_id
                 WHERE pi.image_id = i.id AND p.published AND c.published
             )
+            OR EXISTS (SELECT 1 FROM storefront s WHERE s.published AND s.hero_image_id = i.id)
+            OR EXISTS (
+                SELECT 1 FROM storefront s CROSS JOIN storefront_gallery g
+                WHERE s.published AND (g.embroidery_image_id = i.id OR g.source_image_id = i.id)
+            )
         )
     """).param("id", id).query(mapper).optional().orElseGet { imageNotFound() }
 
@@ -85,8 +90,10 @@ class CatalogImageRepository(private val db: JdbcClient) {
         val referenced = db.sql("""
             SELECT EXISTS (SELECT 1 FROM catalogs WHERE cover_image_id = :id)
                 OR EXISTS (SELECT 1 FROM product_images WHERE image_id = :id)
+                OR EXISTS (SELECT 1 FROM storefront WHERE hero_image_id = :id)
+                OR EXISTS (SELECT 1 FROM storefront_gallery WHERE embroidery_image_id = :id OR source_image_id = :id)
         """).param("id", id).query(Boolean::class.java).single()
-        if (referenced) conflict("Remove the image from catalogs and products before deleting it")
+        if (referenced) conflict("Remove the image from the storefront, catalogs and products before deleting it")
         db.sql("UPDATE catalog_images SET status = 'DELETING' WHERE id = :id").param("id", id).update()
         return image
     }

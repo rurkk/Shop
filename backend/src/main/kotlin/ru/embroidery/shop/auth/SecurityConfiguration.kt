@@ -16,6 +16,7 @@ import org.springframework.security.web.authentication.logout.HttpStatusReturnin
 import org.springframework.security.web.context.HttpSessionSecurityContextRepository
 import org.springframework.security.web.csrf.CsrfToken
 import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository
+import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher
 import org.springframework.stereotype.Component
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RestController
@@ -46,7 +47,10 @@ class SecurityConfiguration {
         tokens: HttpSessionCsrfTokenRepository
     ): SecurityFilterChain = http
         .securityContext { it.securityContextRepository(contexts) }
-        .csrf { it.csrfTokenRepository(tokens) }
+        .csrf {
+            it.csrfTokenRepository(tokens)
+                .ignoringRequestMatchers(PathPatternRequestMatcher.withDefaults().matcher(HttpMethod.POST, "/api/payments/yookassa/webhook"))
+        }
         .requestCache { it.disable() }
         .exceptionHandling {
             it.authenticationEntryPoint { _, response, _ -> response.sendError(401) }
@@ -59,12 +63,13 @@ class SecurityConfiguration {
         .authorizeHttpRequests {
             it.dispatcherTypeMatchers(DispatcherType.ERROR, DispatcherType.ASYNC).permitAll()
             it.requestMatchers(HttpMethod.GET, "/actuator/health/liveness", "/actuator/health/readiness", "/api/csrf").permitAll()
-            it.requestMatchers(HttpMethod.GET, "/api/catalogs", "/api/catalogs/**", "/api/catalog-images/*").permitAll()
+            it.requestMatchers(HttpMethod.GET, "/api/storefront", "/api/catalogs", "/api/catalogs/**", "/api/catalog-images/*")
+                .permitAll()
             it.requestMatchers(HttpMethod.HEAD, "/api/catalogs", "/api/catalogs/**", "/api/catalog-images/*").permitAll()
             it.requestMatchers(
                 HttpMethod.POST, "/api/orders/drafts", "/api/orders/catalog-drafts",
                 "/api/orders/*/access/code", "/api/orders/*/access/verify",
-                "/api/staff/access/code", "/api/staff/access/verify"
+                "/api/staff/access/code", "/api/staff/access/verify", "/api/payments/yookassa/webhook"
             ).permitAll()
             it.requestMatchers("/api/staff/**").hasRole("STAFF")
             it.requestMatchers("/api/orders/**").hasAnyRole("CUSTOMER", "STAFF")

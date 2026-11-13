@@ -15,6 +15,7 @@ import zlib
 
 SHOP = os.environ.get("SHOP_TEST_URL", "http://127.0.0.1:18080").rstrip("/")
 MAIL = os.environ.get("SHOP_TEST_MAIL_URL", "http://127.0.0.1:18025").rstrip("/")
+GATEWAY = os.environ.get("SHOP_TEST_GATEWAY_URL", "http://127.0.0.1:18081").rstrip("/")
 STAFF = os.environ.get("SHOP_TEST_STAFF_EMAIL", "staff@example.test")
 
 
@@ -167,6 +168,95 @@ def delivery_quote(delivery, price):
             "pickupPointAddress": "Тестовая улица, 1", "priceKopecks": price, "deliveryDays": 4}
 
 
+def gateway_command(command, **payload):
+    with open_url(
+        urllib.request.build_opener(), f"{GATEWAY}/test/{command}", "POST",
+        json.dumps(payload).encode(), {"Content-Type": "application/json"},
+    ) as response:
+        return json.load(response)
+
+
+def notify(event, provider_id, expected=200):
+    Browser().call(
+        "/api/payments/yookassa/webhook", "POST",
+        {"type": "notification", "event": event, "object": {"id": provider_id, "status": "succeeded"}},
+        expected=expected,
+    )
+
+
+def open_checkout(buyer, order):
+    route = order + "/payment/checkout"
+    checkout = buyer.call(route, "POST")
+    assert checkout["checkoutStatus"] == "PENDING" and checkout["paidAt"] is None
+    assert buyer.call(route, "POST") == checkout
+    return checkout["checkoutUrl"].rsplit("/", 1)[-1]
+
+
+def check_storefront(staff, buyer):
+    visitor = Browser()
+    route = "/api/storefront"
+    staff_route = "/api/staff/storefront"
+    visitor.call(route, expected=404)
+    buyer.call(staff_route, expected=403)
+    draft = staff.call(staff_route)
+    assert not draft["published"] and draft["gallery"] == []
+    staff.call(staff_route, "PUT", {"version": draft["version"], "published": True}, expected=400)
+    image = png()
+    banner = staff.upload_image("/api/staff/catalog-images", image)
+    embroidery = staff.upload_image("/api/staff/catalog-images", image)
+    source = staff.upload_image("/api/staff/catalog-images", image)
+    form = {
+        "version": draft["version"], "published": True, "heroTitle": " Вышивка по фото ", "heroImageId": banner["id"],
+        "gallery": [{"embroideryImageId": embroidery["id"], "sourceImageId": source["id"], "caption": " Пример "}],
+    }
+    unpublished = staff.call(staff_route, "PUT", dict(form, published=False))
+    visitor.call(f"/api/catalog-images/{source['id']}", expected=404)
+    staff.call(source["url"], "DELETE", expected=409)
+    staff.call(staff_route, "PUT", form, expected=409)
+    published = staff.call(staff_route, "PUT", dict(form, version=unpublished["version"]))
+    public = visitor.call(route)
+    assert public["version"] == published["version"] and public["heroTitle"] == "Вышивка по фото"
+    assert visitor.call(public["heroImage"]["url"]) == image
+    example, = public["gallery"]
+    assert example["caption"] == "Пример" and visitor.call(example["source"]["url"]) == image
+    assert visitor.call(example["embroidery"]["url"]) == image
+    staff.call(staff_route, "PUT", {"version": published["version"]})
+    visitor.call(route, expected=404)
+    visitor.call(example["source"]["url"], expected=404)
+    for upload in (banner, embroidery, source):
+        staff.call(upload["url"], "DELETE", expected=204)
+    print("Verified storefront publication, gallery visibility, and draft image protection", flush=True)
+
+
+def check_cancellation(staff, buyer, order, image):
+    staff_order = order.replace("/api/orders/", "/api/staff/orders/", 1)
+    buyer.upload(order, "SOURCE", image)
+    status(buyer.call(order + "/submit", "POST"), "IN_REVIEW")
+    staff.call(staff_order + "/quote", "POST", {"itemKopecks": 150000, "productionDays": 5})
+    contact = buyer.call(order + "/delivery", "PUT", pickup_contact())
+    staff.call(staff_order + "/delivery-quote", "POST", delivery_quote(contact["delivery"], 30000))
+    provider_id = open_checkout(buyer, order)
+
+    cancellation = {"reason": "Тестовая отмена"}
+    buyer.call(staff_order + "/cancel", "POST", cancellation, expected=403)
+    status(staff.call(staff_order + "/cancel", "POST", cancellation), "CANCELLATION_REQUESTED")
+    buyer.call(order + "/payment/checkout", "POST", expected=409)
+    assert buyer.call(order)["payment"]["checkoutUrl"] is None
+    staff.call(staff_order + "/refund", "POST", expected=409)
+
+    gateway_command("payment", paymentId=provider_id, status="succeeded")
+    notify("payment.succeeded", provider_id)
+    status(buyer.call(order), "CANCELLATION_REQUESTED")
+    assert buyer.call(order)["payment"]["paidAt"]
+    assert staff.call(staff_order + "/refund", "POST")["refund"]["status"] == "PENDING"
+    refund = gateway_command("refund", paymentId=provider_id, status="succeeded")
+    notify("refund.succeeded", refund["id"])
+    cancelled = buyer.call(order)
+    status(cancelled, "CANCELLED")
+    assert cancelled["order"]["cancellationReason"] == cancellation["reason"]
+    assert cancelled["payment"]["refund"]["status"] == "SUCCEEDED"
+
+
 def check_catalog_checkout(staff, other_buyer, run, slug, variant_route, variant):
     buyer = Browser()
     buyer.renew_csrf()
@@ -196,7 +286,7 @@ def check_catalog_checkout(staff, other_buyer, run, slug, variant_route, variant
     assert submitted["order"]["garment"] == "Худи" and submitted["order"]["size"] == variant["size"]
     assert submitted["order"]["itemKopecks"] == variant["priceKopecks"] and submitted["totalKopecks"] is None
     assert submitted["catalogItem"]["sku"] == variant["sku"] and submitted["catalogItem"]["catalogSlug"] == slug
-    assert submitted["payments"] == [] and submitted["sourceFileIds"] == [] and submitted["sketch"] is None
+    assert submitted["payment"] is None and submitted["sourceFileIds"] == [] and submitted["sketch"] is None
     assert staff.call(staff_order) == submitted
 
     page = staff.call("/api/staff/orders?size=1")
@@ -206,7 +296,7 @@ def check_catalog_checkout(staff, other_buyer, run, slug, variant_route, variant
     assert [item["id"] for item in page["items"]] == [order_id]
     assert staff.call(f"/api/staff/orders?type=CUSTOM_PHOTO&search={order_id}")["items"] == []
     staff.call("/api/staff/orders?size=101", expected=400)
-    staff.call(staff_order + "/quote", "POST", {"itemKopecks": 10, "productionDays": 1, "estimatedDeliveryDays": 3},
+    staff.call(staff_order + "/quote", "POST", {"itemKopecks": 10, "productionDays": 1},
                expected=409)
     staff.call(staff_order + "/production-complete", "POST", expected=409)
     buyer.call(order + "/messages", "POST", {"clientMessageId": str(uuid.uuid4()), "body": "Уточнение по доставке"})
@@ -224,22 +314,45 @@ def check_catalog_checkout(staff, other_buyer, run, slug, variant_route, variant
     status(priced, "AWAITING_PAYMENT")
     assert priced["delivery"]["method"] == "CDEK_PICKUP" and priced["delivery"]["deliveryDays"] == 4
     assert priced["totalKopecks"] == variant["priceKopecks"] + 30000
-    payment, = priced["payments"]
-    assert payment["installment"] == "FULL" and payment["amountKopecks"] == priced["totalKopecks"]
+    assert priced["payment"]["amountKopecks"] == priced["totalKopecks"]
     assert buyer.call(order) == priced
     buyer.call(order + "/delivery", "PUT", pickup_contact(), expected=409)
     staff.call(quote_route, "POST", quote, expected=409)
     staff.call(staff_order + "/production-complete", "POST", expected=409)
     ship = {"trackingNumber": "TEST-CATALOG"}
     staff.call(staff_order + "/shipment", "POST", ship, expected=409)
-    pay_route = f"{staff_order}/test-payments/{payment['id']}/confirm"
-    status(staff.call(pay_route, "POST"), "PREPARING_ORDER")
-    status(staff.call(pay_route, "POST"), "PREPARING_ORDER")
+    other_buyer.call(order + "/payment/checkout", "POST", expected=404)
+    provider_id = open_checkout(buyer, order)
+    gateway_command("payment", paymentId=provider_id, status="canceled")
+    notify("payment.canceled", provider_id)
+    status(buyer.call(order), "AWAITING_PAYMENT")
+    replacement_id = open_checkout(buyer, order)
+    assert replacement_id != provider_id
+    gateway_command("payment", paymentId=replacement_id, status="succeeded")
+    notify("payment.succeeded", replacement_id)
+    notify("payment.succeeded", replacement_id)
+    status(buyer.call(order), "PREPARING_ORDER")
     staff.call(staff_order + "/shipment", "POST", ship, expected=409)
     status(staff.call(staff_order + "/production-complete", "POST"), "READY_TO_SHIP")
     status(staff.call(staff_order + "/shipment", "POST", ship), "SHIPPED")
     assert buyer.call(order)["order"]["trackingNumber"] == ship["trackingNumber"]
     assert order_id in wait_for_mail(email, "Заказ готов к оплате")
+    refund_route = staff_order + "/refund"
+    buyer.call(refund_route, "POST", expected=403)
+    requested = staff.call(refund_route, "POST")
+    assert requested["refund"]["status"] == "PENDING"
+    assert staff.call(refund_route, "POST") == requested
+    provider_refund = gateway_command("refund", paymentId=replacement_id, status="succeeded")
+    notify("refund.succeeded", provider_refund["id"])
+    notify("refund.succeeded", provider_refund["id"])
+    assert buyer.call(order)["payment"]["refund"]["status"] == "SUCCEEDED"
+    status(buyer.call(order), "SHIPPED")
+    events = staff.call(staff_order + "/history")["items"]
+    assert [e["action"] for e in events] == [
+        "REFUND_SUCCEEDED", "REFUND_REQUESTED", "SHIPPED", "PAYMENT_CONFIRMED", "DELIVERY_QUOTED",
+    ]
+    assert all(e["createdAt"] for e in events)
+    assert events[1]["actorEmail"] == events[2]["actorEmail"] == events[4]["actorEmail"] == STAFF
 
     staff.call(variant_route, "PUT", editable_variant)
     return form
@@ -346,7 +459,7 @@ def check_catalogs(staff, buyer, run):
     staff.call(product_route, "PUT", dict(product, imageIds=[]))
     staff.call(upload["url"], "DELETE", expected=204)
     staff.call(upload["url"], expected=404)
-    print("Verified catalog management, checkout, shared order queue, single payment, and shipment", flush=True)
+    print("Verified catalog checkout, payment retry, shipment, refund, and staff history", flush=True)
 
 
 def main():
@@ -375,25 +488,35 @@ def main():
     log_in(staff, "/api/staff/access", STAFF)
     assert any(item["id"] == order.rsplit("/", 1)[-1] for item in staff.call("/api/staff/orders")["items"])
     check_catalogs(staff, buyer, run)
-    other.upload(other_order, "SOURCE", image)
-    status(other.call(other_order + "/submit", "POST"), "IN_REVIEW")
-    rejected = staff.call(other_order.replace("/api/orders/", "/api/staff/orders/") + "/reject",
-                          "POST", {"reason": "Тестовый отказ"})
-    status(rejected, "REJECTED")
-    assert other.call(other_order)["order"]["rejectionReason"] == "Тестовый отказ"
-
+    check_storefront(staff, buyer)
     print("Verified order access, CSRF, and private S3 upload/download", flush=True)
     quote = staff.call(
-        staff_order + "/quote", "POST", {"itemKopecks": 175001, "productionDays": 7, "estimatedDeliveryDays": 5},
+        staff_order + "/quote", "POST", {"itemKopecks": 175001, "productionDays": 7},
     )
-    status(quote, "AWAITING_DEPOSIT")
-    assert quote["order"]["estimatedDeliveryDays"] == 5 and quote["totalKopecks"] is None
-    deposit = quote["payments"][0]
-    assert deposit["amountKopecks"] == 87501
-    deposit_route = f"{staff_order}/test-payments/{deposit['id']}/confirm"
-    buyer.call(deposit_route, "POST", expected=403)
-    status(staff.call(deposit_route, "POST"), "PREPARING_SKETCH")
-    status(staff.call(deposit_route, "POST"), "PREPARING_SKETCH")
+    status(quote, "AWAITING_DELIVERY_QUOTE")
+    assert quote["totalKopecks"] is None and quote["payment"] is None
+    buyer.call(order + "/payment/checkout", "POST", expected=409)
+    delivery_route = staff_order + "/delivery-quote"
+    staff.call(delivery_route, "POST", delivery_quote({"version": 1}, 30000), expected=409)
+    with_contact = buyer.call(order + "/delivery", "PUT", pickup_contact())
+    priced = staff.call(delivery_route, "POST", delivery_quote(with_contact["delivery"], 30000))
+    status(priced, "AWAITING_PAYMENT")
+    assert priced["totalKopecks"] == priced["payment"]["amountKopecks"] == 205001
+    staff.upload(order, "SKETCH", image, expected=409)
+    gateway_command("lose-payment-response")
+    buyer.call(order + "/payment/checkout", "POST", expected=502)
+    assert buyer.call(order)["payment"]["checkoutStatus"] == "CREATING"
+    recovered = buyer.call(order + "/payment/sync", "POST")
+    provider_id = open_checkout(buyer, order)
+    assert recovered["checkoutUrl"].endswith(provider_id)
+    notify("payment.succeeded", provider_id)
+    status(buyer.call(order), "AWAITING_PAYMENT")
+    gateway_command("payment", paymentId=provider_id, status="succeeded", value="2050.00")
+    notify("payment.succeeded", provider_id, expected=502)
+    assert buyer.call(order)["payment"]["paidAt"] is None
+    gateway_command("payment", paymentId=provider_id, value="2050.01")
+    assert buyer.call(order + "/payment/sync", "POST")["paidAt"]
+    status(buyer.call(order), "PREPARING_SKETCH")
 
     attachment = staff.upload(order, "CHAT", image)
     attachment_path = f"{order}/files/{attachment['id']}"
@@ -430,26 +553,18 @@ def main():
     assert revised["version"] == 2
     buyer.call(old_sketch + "/approve", "POST", expected=409)
     status(buyer.call(f"{order}/sketches/{revised['id']}/approve", "POST"), "IN_PRODUCTION")
-    delivery_route = staff_order + "/delivery-quote"
-    staff.call(delivery_route, "POST", delivery_quote({"version": 1}, 30000), expected=409)
     finished = staff.call(staff_order + "/production-complete", "POST")
-    status(finished, "AWAITING_DELIVERY_QUOTE")
-    assert len(finished["payments"]) == 1
-    staff.call(delivery_route, "POST", delivery_quote({"version": 1}, 30000), expected=409)
-    with_contact = buyer.call(order + "/delivery", "PUT", pickup_contact())
-    priced = staff.call(delivery_route, "POST", delivery_quote(with_contact["delivery"], 30000))
-    status(priced, "AWAITING_BALANCE")
-    assert priced["totalKopecks"] == 205001
-    balance = priced["payments"][1]
-    assert balance["installment"] == "BALANCE" and balance["amountKopecks"] == 117500
+    status(finished, "READY_TO_SHIP")
+    assert finished["payment"]["id"] == priced["payment"]["id"] and finished["payment"]["paidAt"]
     staff.call(staff_order + "/reject", "POST", {"reason": "Тест"}, expected=409)
-    staff.call(staff_order + "/shipment", "POST", {"trackingNumber": "TEST123"}, expected=409)
-    status(staff.call(f"{staff_order}/test-payments/{balance['id']}/confirm", "POST"), "READY_TO_SHIP")
     status(staff.call(staff_order + "/shipment", "POST", {"trackingNumber": "TEST123"}), "SHIPPED")
     assert buyer.call(order)["order"]["trackingNumber"] == "TEST123"
+    buyer.call(staff_order + "/history", expected=403)
     buyer.call("/api/session/logout", "POST", expected=204)
     buyer.call(order, expected=401)
-    print("Verified sketch approval, two test installments with delivery, shipment, and logout")
+    print("Verified one advance payment with delivery, sketch approval, shipment, and logout")
+    check_cancellation(staff, other, other_order, image)
+    print("Verified cancellation and refund after payment on a previously issued link", flush=True)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Shop
 
-Backend фабрики кастомной вышивки. API поддерживает оформление заказа по фото и из каталога, ручной расчёт доставки до ПВЗ СДЭК, переписку и обработку заказов сотрудником.
+Backend фабрики кастомной вышивки. API поддерживает два сценария заказа, ручной расчёт доставки до ПВЗ СДЭК, оплату через тестовый магазин ЮKassa, переписку и настройки витрины.
 
 [Требования к Shop](docs/requirements.md) описывают оба сценария заказа, первый полноценный релиз и архитектуру.
 
@@ -10,13 +10,13 @@ Backend фабрики кастомной вышивки. API поддержив
 
 ~~~sh
 ./backend/gradlew -p backend --no-daemon check bootJar
-docker compose --env-file .env.example -f compose.yaml -f compose.local.yaml up --build --wait
+docker compose --env-file .env.example -f compose.yaml -f compose.local.yaml -f infra/tests/compose.yaml up --build --wait
 python3 infra/tests/smoke.py
 ~~~
 
 - API доступен через [Nginx](http://127.0.0.1:18080/api/csrf), коды и уведомления попадают в [Mailpit](http://127.0.0.1:18025). Тестовая учётная запись сотрудника — staff@example.test.
 - Скрипт создаёт тестовые заказы и запрашивает коды для вымышленных адресов. Повторный запуск под той же почтой сотрудника возможен через минуту из-за ограничения выдачи кодов.
-- Для остановки выполните `docker compose --env-file .env.example -f compose.yaml -f compose.local.yaml down`. Тома сохраняются.
+- Для остановки выполните `docker compose --env-file .env.example -f compose.yaml -f compose.local.yaml -f infra/tests/compose.yaml down`. Тома сохраняются. Базу с тестовыми заказами по старой схеме 50/50 нужно пересоздать в рамках миграции на один платёж. Используйте `down --volumes` только для своего временного тестового стенда.
 
 ## Заказы
 
@@ -32,10 +32,13 @@ python3 infra/tests/smoke.py
 | Указать или обновить данные получателя и ПВЗ | `PUT /api/orders/{id}/delivery` |
 | Войти сотруднику | `POST /api/staff/access/code` и `POST /api/staff/access/verify` |
 | Открыть очередь или карточку заказа сотрудником | `GET /api/staff/orders` и `GET /api/staff/orders/{id}` |
-| Оценить заказ по фото | `POST /api/staff/orders/{id}/quote` с `itemKopecks`, `productionDays` и `estimatedDeliveryDays` |
-| Подтвердить ПВЗ и стоимость доставки, выставить полную оплату или доплату | `POST /api/staff/orders/{id}/delivery-quote` |
+| Оценить заказ по фото | `POST /api/staff/orders/{id}/quote` с `itemKopecks` и `productionDays` |
+| Подтвердить ПВЗ и выставить общую сумму с доставкой | `POST /api/staff/orders/{id}/delivery-quote` |
 | Отклонить заявку при рассмотрении | `POST /api/staff/orders/{id}/reject` с `reason` |
-| Подтвердить платёж на локальном стенде | `POST /api/staff/orders/{id}/test-payments/{paymentId}/confirm` |
+| Получить платёжную ссылку или сверить платёж после возврата на сайт | `POST /api/orders/{id}/payment/checkout` и `POST /api/orders/{id}/payment/sync` |
+| Начать отмену заказа до отправки | `POST /api/staff/orders/{id}/cancel` с `reason` |
+| Вернуть полную оплату при отмене или после отправки | `POST /api/staff/orders/{id}/refund` |
+| Открыть историю суммы, отмены, отправки и возврата | `GET /api/staff/orders/{id}/history` с `page` и `size` |
 | Опубликовать эскиз по `fileId` | `POST /api/staff/orders/{id}/sketches` |
 | Согласовать версию эскиза или запросить правки | `POST /api/orders/{id}/sketches/{sketchId}/approve` или `POST /api/orders/{id}/sketches/{sketchId}/request-changes` |
 | Отметить готовность и после полной оплаты указать `trackingNumber` | `POST /api/staff/orders/{id}/production-complete` и `POST /api/staff/orders/{id}/shipment` |
@@ -49,9 +52,19 @@ python3 infra/tests/smoke.py
 
 Для доставки покупатель указывает `recipientName`, `phone` в международном формате с плюсом, `city` и хотя бы одно из полей `pickupPointCode` и `pickupPointAddress`. Менеджер передаёт оба поля ПВЗ, `priceKopecks`, `deliveryDays` и `deliveryVersion` из `delivery.version`. При обновлении данных покупателем версия меняется. Попытка применить старый расчёт или провести действие вне допустимого этапа возвращает HTTP `409`.
 
-Карточка возвращает `delivery`, список платежей и `totalKopecks` после расчёта доставки. В заказе по фото предоплата `DEPOSIT` покрывает 50% изделия, `BALANCE` включает остаток и доставку. В каталоге `FULL` покрывает товар и доставку целиком. Тестовое подтверждение доступно только в локальном профиле. [Этапы обоих типов заказа](docs/requirements.md#статусная-модель)
+Карточка возвращает `delivery`, `totalKopecks` и единственный `payment` после расчёта доставки. Сумма покрывает изделие и перевозку. Подтверждение платежа открывает подготовку заказа из каталога или эскиза для вышивки по фото. [Этапы обоих типов заказа](docs/requirements.md#статусная-модель)
 
 Чат доступен после отправки черновика. `GET /api/orders/{id}/messages` возвращает последние сообщения и `lastSequence`, параметр `before` открывает предыдущую страницу. Отправка идёт через `POST /api/orders/{id}/messages` с `clientMessageId` для безопасного повтора. Подписка `GET /api/orders/{id}/messages/stream?after={lastSequence}` передаёт события `message.created`. При переподключении сервер использует заголовок `Last-Event-ID`, если браузер его передал.
+
+### Тестовый магазин ЮKassa
+
+Compose из `infra/tests/compose.yaml` запускает локальный имитатор. Для проверки с ЮKassa запустите обычные `compose.yaml` и `compose.local.yaml`. В защищённом файле окружения задайте `SHOP_YOOKASSA_ENABLED=true`, `SHOP_YOOKASSA_SHOP_ID`, `SHOP_YOOKASSA_SECRET_KEY` тестового магазина и `SHOP_PUBLIC_ORIGIN` стенда. В кабинете тестового магазина укажите HTTPS-адрес `/api/payments/yookassa/webhook` и события `payment.succeeded`, `payment.canceled`, `refund.succeeded`. URL возврата ведёт на будущую карточку `/orders/{id}`. Для приёма реальных денег потребуется настроить кассу и чеки. [Инструкция ЮKassa](https://yookassa.ru/developers/payment-acceptance/testing-and-going-live/testing)
+
+Менеджер может сверить открытый платёж и состояние возврата через `payment/sync`. При отмене с открытой ссылкой заказ ждёт результата платежа. Если деньги поступили, менеджер оформляет полный возврат. Если провайдер ещё обрабатывает возврат, карточка показывает его состояние. Повтор запроса после неопределённого ответа использует сохранённый ключ в пределах 23 часов, затем требуется сверка в кабинете. [Идемпотентность ЮKassa](https://yookassa.ru/developers/using-api/interaction-format)
+
+## Настройки главной
+
+Опубликованные настройки доступны через `GET /api/storefront`. Сотрудник использует `GET` и `PUT /api/staff/storefront`. Запись заменяет настройки целиком и принимает `version`, `published`, `heroTitle`, `heroImageId` и массив `gallery`. У примера обязательное `embroideryImageId` и необязательные `sourceImageId` и `caption`. Порядок массива задаёт порядок показа. Изображения загружаются через `POST /api/staff/catalog-images`. Устаревшая версия настроек возвращает HTTP `409`, неопубликованная витрина публично возвращает `404`.
 
 ## Каталоги
 
