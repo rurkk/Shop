@@ -1,0 +1,9 @@
+.git
+.env*
+**/.gradle
+**/.kotlin
+**/build
+**/.idea
+**/__pycache__
+**/*.pem
+**/*.key

@@ -1,0 +1,74 @@
+spring:
+  application:
+    name: embroidery-shop
+  task:
+    scheduling:
+      pool:
+        size: 3
+  datasource:
+    url: ${SHOP_DB_URL}
+    username: ${SHOP_DB_USER}
+    password: ${SHOP_DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 8
+      minimum-idle: 1
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 11MB
+      file-size-threshold: 0
+      resolve-lazily: true
+  mail:
+    host: ${SHOP_SMTP_HOST}
+    port: ${SHOP_SMTP_PORT:587}
+    username: ${SHOP_SMTP_USERNAME:}
+    password: ${SHOP_SMTP_PASSWORD:}
+    properties:
+      mail.smtp.auth: ${SHOP_SMTP_AUTH:true}
+      mail.smtp.starttls.enable: ${SHOP_SMTP_STARTTLS:true}
+      mail.smtp.starttls.required: ${SHOP_SMTP_STARTTLS:true}
+      mail.smtp.connectiontimeout: 3000
+      mail.smtp.timeout: 5000
+      mail.smtp.writetimeout: 5000
+server:
+  forward-headers-strategy: framework
+  error:
+    include-message: never
+    include-stacktrace: never
+  servlet:
+    session:
+      timeout: 30m
+      cookie:
+        http-only: true
+        secure: ${SHOP_SECURE_COOKIES:true}
+        same-site: lax
+  tomcat:
+    threads:
+      max: 40
+      min-spare: 2
+    max-swallow-size: 12MB
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+      group:
+        readiness:
+          include: readinessState,db,objectStorage
+shop:
+  staff-emails: ${SHOP_STAFF_EMAILS}
+  code-secret: ${SHOP_CODE_SECRET}
+  mail-from: ${SHOP_MAIL_FROM}
+  storage:
+    endpoint: ${SHOP_S3_ENDPOINT}
+    bucket: ${SHOP_S3_BUCKET}
+    access-key: ${SHOP_S3_ACCESS_KEY}
+    secret-key: ${SHOP_S3_SECRET_KEY}

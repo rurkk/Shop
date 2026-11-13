@@ -1,0 +1,28 @@
+services:
+  backend:
+    image: ${SHOP_BACKEND_IMAGE:?Set SHOP_BACKEND_IMAGE to the built backend image}
+    environment:
+      SPRING_PROFILES_ACTIVE: production
+      SHOP_SMTP_HOST: ${SHOP_SMTP_HOST:?Set SHOP_SMTP_HOST}
+      SHOP_SMTP_PORT: ${SHOP_SMTP_PORT:-587}
+      SHOP_SMTP_USERNAME: ${SHOP_SMTP_USERNAME:?Set SHOP_SMTP_USERNAME}
+      SHOP_SMTP_PASSWORD: ${SHOP_SMTP_PASSWORD:?Set SHOP_SMTP_PASSWORD}
+
+  nginx:
+    image: shop-nginx:production
+    build:
+      context: ./infra/nginx
+      target: production
+    environment:
+      NGINX_ENVSUBST_FILTER: "^SHOP_DOMAIN$"
+      SHOP_DOMAIN: ${SHOP_DOMAIN:?Set SHOP_DOMAIN}
+    volumes:
+      - type: bind
+        source: ${SHOP_TLS_DIR:?Set SHOP_TLS_DIR}
+        target: /etc/nginx/tls
+        read_only: true
+        bind:
+          create_host_path: false
+    ports:
+      - "80:80"
+      - "443:443"

@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+*.iml
+.gradle/
+.kotlin/
+**/build/
+__pycache__/
+*.pem
+*.key
