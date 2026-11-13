@@ -62,7 +62,8 @@ class SecurityConfiguration {
             it.requestMatchers(HttpMethod.GET, "/api/catalogs", "/api/catalogs/**", "/api/catalog-images/*").permitAll()
             it.requestMatchers(HttpMethod.HEAD, "/api/catalogs", "/api/catalogs/**", "/api/catalog-images/*").permitAll()
             it.requestMatchers(
-                HttpMethod.POST, "/api/orders/drafts", "/api/orders/*/access/code", "/api/orders/*/access/verify",
+                HttpMethod.POST, "/api/orders/drafts", "/api/orders/catalog-drafts",
+                "/api/orders/*/access/code", "/api/orders/*/access/verify",
                 "/api/staff/access/code", "/api/staff/access/verify"
             ).permitAll()
             it.requestMatchers("/api/staff/**").hasRole("STAFF")

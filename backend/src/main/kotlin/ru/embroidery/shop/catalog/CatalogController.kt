@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.ResponseStatus
 import org.springframework.web.bind.annotation.RestController
+import ru.embroidery.shop.Pagination
 import java.util.UUID
 
 @RestController
@@ -21,14 +22,14 @@ class CatalogController(private val catalog: CatalogService) {
     fun list(
         @RequestParam(defaultValue = "0") page: Int,
         @RequestParam(defaultValue = "24") size: Int
-    ) = catalog.listCatalogs(CatalogPagination(page, size), publicView = true)
+    ) = catalog.listCatalogs(Pagination(page, size), publicView = true)
 
     @GetMapping("/{catalogSlug}")
     fun detail(
         @PathVariable catalogSlug: String,
         @RequestParam(defaultValue = "0") page: Int,
         @RequestParam(defaultValue = "24") size: Int
-    ) = catalog.publishedCatalog(catalogSlug, CatalogPagination(page, size))
+    ) = catalog.publishedCatalog(catalogSlug, Pagination(page, size))
 
     @GetMapping("/{catalogSlug}/products/{productSlug}")
     fun product(@PathVariable catalogSlug: String, @PathVariable productSlug: String) =
@@ -42,14 +43,14 @@ class StaffCatalogController(private val catalog: CatalogService) {
     fun list(
         @RequestParam(defaultValue = "0") page: Int,
         @RequestParam(defaultValue = "24") size: Int
-    ) = catalog.listCatalogs(CatalogPagination(page, size), publicView = false)
+    ) = catalog.listCatalogs(Pagination(page, size), publicView = false)
 
     @GetMapping("/{id}")
     fun detail(
         @PathVariable id: UUID,
         @RequestParam(defaultValue = "0") page: Int,
         @RequestParam(defaultValue = "24") size: Int
-    ) = catalog.catalogForStaff(id, CatalogPagination(page, size))
+    ) = catalog.catalogForStaff(id, Pagination(page, size))
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
@@ -79,7 +80,7 @@ class StaffProductController(private val catalog: CatalogService) {
     fun list(
         @RequestParam(defaultValue = "0") page: Int,
         @RequestParam(defaultValue = "24") size: Int
-    ) = catalog.listProducts(CatalogPagination(page, size))
+    ) = catalog.listProducts(Pagination(page, size))
 
     @GetMapping("/{id}")
     fun detail(@PathVariable id: UUID) = catalog.productForStaff(id)

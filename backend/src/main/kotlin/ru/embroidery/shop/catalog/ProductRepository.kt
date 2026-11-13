@@ -3,6 +3,8 @@ package ru.embroidery.shop.catalog
 import org.springframework.jdbc.core.RowMapper
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
+import ru.embroidery.shop.Page
+import ru.embroidery.shop.Pagination
 import java.sql.Types
 import java.util.UUID
 
@@ -23,12 +25,12 @@ class ProductRepository(private val db: JdbcClient) {
         )
     }
 
-    fun list(page: CatalogPagination): CatalogPage<ProductSummary> = page.result(db.sql("""
+    fun list(page: Pagination): Page<ProductSummary> = page.result(db.sql("""
         SELECT $summaryColumns, NULL::integer AS display_order FROM products p
         ORDER BY p.slug LIMIT :limit OFFSET :offset
     """).param("limit", page.limit).param("offset", page.offset).query(summaryMapper(false)).list())
 
-    fun inCatalog(catalogId: UUID, page: CatalogPagination, publicView: Boolean): CatalogPage<ProductSummary> =
+    fun inCatalog(catalogId: UUID, page: Pagination, publicView: Boolean): Page<ProductSummary> =
         page.result(db.sql("""
             SELECT $summaryColumns, cp.display_order
             FROM catalog_products cp JOIN products p ON p.id = cp.product_id
@@ -48,6 +50,21 @@ class ProductRepository(private val db: JdbcClient) {
         WHERE c.slug = :catalogSlug AND c.published AND p.slug = :productSlug AND p.published
     """).param("catalogSlug", catalogSlug).param("productSlug", productSlug)
         .query(productMapper).optional().orElseGet { productNotFound() }
+
+    fun publishedVariant(catalogSlug: String, variantId: UUID): CatalogVariant = db.sql("""
+        SELECT v.*, p.slug AS product_slug, p.name AS product_name, p.garment_type
+        FROM product_variants v
+        JOIN products p ON p.id = v.product_id
+        JOIN catalog_products cp ON cp.product_id = p.id
+        JOIN catalogs c ON c.id = cp.catalog_id
+        WHERE v.id = :variant AND c.slug = :catalogSlug AND c.published AND p.published
+    """).param("catalogSlug", catalogSlug).param("variant", variantId)
+        .query { rs, row ->
+            CatalogVariant(
+                rs.getString("product_slug"), rs.getString("product_name"), rs.getString("garment_type"),
+                requireNotNull(variantMapper.mapRow(rs, row))
+            )
+        }.optional().orElseGet { variantNotFound() }
 
     fun lock(id: UUID): Boolean = db.sql("SELECT published FROM products WHERE id = :id FOR UPDATE")
         .param("id", id).query(Boolean::class.java).optional().orElseGet { productNotFound() }

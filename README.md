@@ -1,6 +1,6 @@
 # Shop
 
-Backend фабрики кастомной вышивки. Первый сценарий в API охватывает заказ по фото от черновика до отправки.
+Backend фабрики кастомной вышивки. API поддерживает оформление заказа по фото и из каталога, ручной расчёт доставки до ПВЗ СДЭК, переписку и обработку заказов сотрудником.
 
 [Требования к Shop](docs/requirements.md) описывают оба сценария заказа, первый полноценный релиз и архитектуру.
 
@@ -18,29 +18,40 @@ python3 infra/tests/smoke.py
 - Скрипт создаёт тестовые заказы и запрашивает коды для вымышленных адресов. Повторный запуск под той же почтой сотрудника возможен через минуту из-за ограничения выдачи кодов.
 - Для остановки выполните `docker compose --env-file .env.example -f compose.yaml -f compose.local.yaml down`. Тома сохраняются.
 
-## Сценарий заказа
+## Заказы
 
 | Действие | HTTP |
 | --- | --- |
 | Получить токен для изменения данных | `GET /api/csrf` |
-| Создать черновик с email, изделием, размером и цветом | `POST /api/orders/drafts` |
+| Создать черновик заказа по фото с email, изделием, размером и цветом | `POST /api/orders/drafts` |
+| Создать черновик заказа из каталога с `email`, `catalogSlug`, `variantId` и `delivery` | `POST /api/orders/catalog-drafts` |
 | Запросить и подтвердить код для черновика или действующего заказа | `POST /api/orders/{id}/access/code` и `POST /api/orders/{id}/access/verify` |
 | Загрузить фото, эскиз или вложение | `POST /api/orders/{id}/files?purpose=SOURCE\|SKETCH\|CHAT`, поле multipart `file` |
-| Передать заказ менеджеру после загрузки фото | `POST /api/orders/{id}/submit` |
+| Передать заказ менеджеру после входа по коду. Для заказа по фото сначала загрузить исходник | `POST /api/orders/{id}/submit` |
 | Открыть заказ или скачать доступный файл | `GET /api/orders/{id}` или `GET /api/orders/{id}/files/{fileId}` |
-| Войти сотруднику и открыть список заказов | `POST /api/staff/access/code`, `POST /api/staff/access/verify` и `GET /api/staff/orders` |
-| Выставить цену в копейках и срок в днях | `POST /api/staff/orders/{id}/quote` |
+| Указать или обновить данные получателя и ПВЗ | `PUT /api/orders/{id}/delivery` |
+| Войти сотруднику | `POST /api/staff/access/code` и `POST /api/staff/access/verify` |
+| Открыть очередь или карточку заказа сотрудником | `GET /api/staff/orders` и `GET /api/staff/orders/{id}` |
+| Оценить заказ по фото | `POST /api/staff/orders/{id}/quote` с `itemKopecks`, `productionDays` и `estimatedDeliveryDays` |
+| Подтвердить ПВЗ и стоимость доставки, выставить полную оплату или доплату | `POST /api/staff/orders/{id}/delivery-quote` |
+| Отклонить заявку при рассмотрении | `POST /api/staff/orders/{id}/reject` с `reason` |
 | Подтвердить платёж на локальном стенде | `POST /api/staff/orders/{id}/test-payments/{paymentId}/confirm` |
 | Опубликовать эскиз по `fileId` | `POST /api/staff/orders/{id}/sketches` |
 | Согласовать версию эскиза или запросить правки | `POST /api/orders/{id}/sketches/{sketchId}/approve` или `POST /api/orders/{id}/sketches/{sketchId}/request-changes` |
-| Отметить готовность и указать трек-номер после доплаты | `POST /api/staff/orders/{id}/production-complete` и `POST /api/staff/orders/{id}/shipment` |
+| Отметить готовность и после полной оплаты указать `trackingNumber` | `POST /api/staff/orders/{id}/production-complete` и `POST /api/staff/orders/{id}/shipment` |
 | Выйти из сессии | `POST /api/session/logout` |
 
 Запросы на изменение передают cookie сессии и CSRF-токен в заголовке, имя и значение которого возвращает `GET /api/csrf`. После входа нужно получить свежий токен. Код действует 10 минут, доступ покупателя ограничен одним заказом. Файлы JPEG и PNG до 10 МиБ проходят через backend и хранятся в приватном S3-совместимом бакете.
 
-Чат доступен после отправки черновика. `GET /api/orders/{id}/messages` возвращает последние сообщения и `lastSequence`, параметр `before` открывает предыдущую страницу. Отправка идёт через `POST /api/orders/{id}/messages` с `clientMessageId` для безопасного повтора. Подписка `GET /api/orders/{id}/messages/stream?after={lastSequence}` передаёт события `message.created`. При переподключении сервер использует заголовок `Last-Event-ID`, если браузер его передал.
+Очередь сотрудника показывает поданные заявки и возвращает `items`, `page`, `size`, `hasMore`. Параметры `page` и `size` по умолчанию равны 0 и 24, максимальный размер страницы — 100. `type` фильтрует по `CUSTOM_PHOTO` или `CATALOG`, `status` — по этапу, `search` ищет по полному UUID заказа или email без учёта регистра.
 
-Сумма делится на предоплату и доплату перед отправкой. Тестовые подтверждения включаются только локальным профилем. Заказ из каталога, выбор доставки и интеграция с Instagram запланированы на следующие этапы.
+При создании черновика из каталога backend проверяет публикацию коллекции и товара, принадлежность варианта коллекции и его доступность. Карточка хранит выбранные размер, цвет, цену изделия в `order.itemKopecks` и сведения о товаре в `catalogItem`. Цена и SKU фиксируются при создании черновика.
+
+Для доставки покупатель указывает `recipientName`, `phone` в международном формате с плюсом, `city` и хотя бы одно из полей `pickupPointCode` и `pickupPointAddress`. Менеджер передаёт оба поля ПВЗ, `priceKopecks`, `deliveryDays` и `deliveryVersion` из `delivery.version`. При обновлении данных покупателем версия меняется. Попытка применить старый расчёт или провести действие вне допустимого этапа возвращает HTTP `409`.
+
+Карточка возвращает `delivery`, список платежей и `totalKopecks` после расчёта доставки. В заказе по фото предоплата `DEPOSIT` покрывает 50% изделия, `BALANCE` включает остаток и доставку. В каталоге `FULL` покрывает товар и доставку целиком. Тестовое подтверждение доступно только в локальном профиле. [Этапы обоих типов заказа](docs/requirements.md#статусная-модель)
+
+Чат доступен после отправки черновика. `GET /api/orders/{id}/messages` возвращает последние сообщения и `lastSequence`, параметр `before` открывает предыдущую страницу. Отправка идёт через `POST /api/orders/{id}/messages` с `clientMessageId` для безопасного повтора. Подписка `GET /api/orders/{id}/messages/stream?after={lastSequence}` передаёт события `message.created`. При переподключении сервер использует заголовок `Last-Event-ID`, если браузер его передал.
 
 ## Каталоги
 
@@ -64,7 +75,7 @@ python3 infra/tests/smoke.py
 | `POST /api/staff/products/{id}/variants`, `PUT /api/staff/products/{id}/variants/{variantId}`, `DELETE /api/staff/products/{id}/variants/{variantId}` | Создать, изменить или удалить вариант. Поля `sku`, `size`, `color`, `priceKopecks`, `availability`, `productionDays` |
 | `POST /api/staff/catalog-images`, `GET /api/staff/catalog-images/{id}`, `DELETE /api/staff/catalog-images/{id}` | Загрузить JPEG или PNG до 10 МиБ в поле multipart `file`, открыть фото для предпросмотра или удалить его после снятия всех привязок |
 
-Для публикации товара нужны хотя бы одно фото и один вариант. Первое фото в `imageIds` становится обложкой. Вариант имеет наличие `IN_STOCK`, `MADE_TO_ORDER` или `OUT_OF_STOCK`. Для `MADE_TO_ORDER` указывают `productionDays`. Наличие задаёт сотрудник, правила резерва будут частью оформления заказа. Для записи нужны роль сотрудника, cookie сессии и CSRF-токен. Повторяющийся `slug`, SKU или сочетание размера и цвета в одном товаре возвращает `409`.
+Для публикации товара нужны хотя бы одно фото и один вариант. Первое фото в `imageIds` становится обложкой. Вариант имеет наличие `IN_STOCK`, `MADE_TO_ORDER` или `OUT_OF_STOCK`. Для `MADE_TO_ORDER` указывают `productionDays`. Наличие перед выставлением платежа подтверждает сотрудник. Для записи нужны роль сотрудника, cookie сессии и CSRF-токен. Повторяющийся `slug`, SKU или сочетание размера и цвета в одном товаре возвращает `409`.
 
 ## Один сервер
 

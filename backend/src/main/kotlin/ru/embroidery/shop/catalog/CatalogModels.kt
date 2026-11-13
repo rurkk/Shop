@@ -10,7 +10,7 @@ import jakarta.validation.constraints.PositiveOrZero
 import jakarta.validation.constraints.Size
 import org.springframework.http.HttpStatus
 import ru.embroidery.shop.ApiFailure
-import ru.embroidery.shop.badRequest
+import ru.embroidery.shop.Page
 import java.util.UUID
 
 enum class CatalogKind { COLLECTION, SELECTION }
@@ -99,20 +99,14 @@ data class ProductVariant(
     val productionDays: Int?
 )
 
-data class CatalogContents(val catalog: Catalog, val products: CatalogPage<ProductSummary>)
+data class CatalogContents(val catalog: Catalog, val products: Page<ProductSummary>)
 
-data class CatalogPage<T>(val items: List<T>, val page: Int, val size: Int, val hasMore: Boolean)
-
-class CatalogPagination(private val page: Int, private val size: Int) {
-    init {
-        if (page < 0 || size !in 1..100) badRequest("Page must be non-negative and size must be between 1 and 100")
-    }
-
-    val limit = size + 1
-    val offset = page.toLong() * size
-
-    fun <T> result(rows: List<T>) = CatalogPage(rows.take(size), page, size, rows.size > size)
-}
+data class CatalogVariant(
+    val productSlug: String,
+    val productName: String,
+    val garmentType: String,
+    val variant: ProductVariant
+)
 
 internal fun catalogNotFound(): Nothing = throw ApiFailure(HttpStatus.NOT_FOUND, "Catalog not found")
 internal fun productNotFound(): Nothing = throw ApiFailure(HttpStatus.NOT_FOUND, "Product not found")

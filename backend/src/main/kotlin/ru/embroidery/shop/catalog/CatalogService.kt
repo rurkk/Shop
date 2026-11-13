@@ -3,6 +3,7 @@ package ru.embroidery.shop.catalog
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Isolation
 import org.springframework.transaction.annotation.Transactional
+import ru.embroidery.shop.Pagination
 import ru.embroidery.shop.badRequest
 import ru.embroidery.shop.conflict
 import java.util.UUID
@@ -13,16 +14,16 @@ class CatalogService(
     private val products: ProductRepository,
     private val images: CatalogImageRepository
 ) {
-    fun listCatalogs(page: CatalogPagination, publicView: Boolean) = catalogs.list(page, publicView)
+    fun listCatalogs(page: Pagination, publicView: Boolean) = catalogs.list(page, publicView)
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
-    fun publishedCatalog(slug: String, page: CatalogPagination): CatalogContents {
+    fun publishedCatalog(slug: String, page: Pagination): CatalogContents {
         val catalog = catalogs.published(slug)
         return CatalogContents(catalog, products.inCatalog(catalog.id, page, publicView = true))
     }
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
-    fun catalogForStaff(id: UUID, page: CatalogPagination): CatalogContents =
+    fun catalogForStaff(id: UUID, page: Pagination): CatalogContents =
         CatalogContents(catalogs.get(id), products.inCatalog(id, page, publicView = false))
 
     @Transactional
@@ -52,7 +53,7 @@ class CatalogService(
         catalogs.removeProduct(catalogId, productId)
     }
 
-    fun listProducts(page: CatalogPagination) = products.list(page)
+    fun listProducts(page: Pagination) = products.list(page)
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     fun publishedProduct(catalogSlug: String, productSlug: String): Product =

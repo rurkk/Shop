@@ -11,6 +11,7 @@ import ru.embroidery.shop.conflict
 import ru.embroidery.shop.order.Order
 import ru.embroidery.shop.order.OrderRepository
 import ru.embroidery.shop.order.OrderStatus
+import ru.embroidery.shop.order.OrderType
 import java.util.UUID
 
 enum class FilePurpose { SOURCE, SKETCH, CHAT }
@@ -92,10 +93,12 @@ class OrderFileRepository(private val db: JdbcClient, private val orders: OrderR
         when (purpose) {
             FilePurpose.SOURCE -> {
                 if (actor.role != Role.CUSTOMER) forbiddenUpload()
+                order.requireType(OrderType.CUSTOM_PHOTO)
                 order.requireStatus(OrderStatus.DRAFT)
             }
             FilePurpose.SKETCH -> {
                 if (actor.role != Role.STAFF) forbiddenUpload()
+                order.requireType(OrderType.CUSTOM_PHOTO)
                 order.requireStatus(OrderStatus.PREPARING_SKETCH, OrderStatus.SKETCH_REVIEW, OrderStatus.CHANGES_REQUESTED)
             }
             FilePurpose.CHAT -> {

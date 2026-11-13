@@ -3,12 +3,14 @@ package ru.embroidery.shop.catalog
 import org.springframework.jdbc.core.RowMapper
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
+import ru.embroidery.shop.Page
+import ru.embroidery.shop.Pagination
 import java.sql.Types
 import java.util.UUID
 
 @Repository
 class CatalogRepository(private val db: JdbcClient) {
-    fun list(page: CatalogPagination, publicView: Boolean): CatalogPage<Catalog> =
+    fun list(page: Pagination, publicView: Boolean): Page<Catalog> =
         page.result(db.sql("""
             SELECT * FROM catalogs WHERE (NOT :publicView OR published)
             ORDER BY display_order, slug LIMIT :limit OFFSET :offset

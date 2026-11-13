@@ -1,12 +1,6 @@
 package ru.embroidery.shop.order
 
 import jakarta.validation.Valid
-import jakarta.validation.constraints.Email
-import jakarta.validation.constraints.Max
-import jakarta.validation.constraints.Min
-import jakarta.validation.constraints.NotBlank
-import jakarta.validation.constraints.Positive
-import jakarta.validation.constraints.Size
 import org.springframework.context.annotation.Profile
 import org.springframework.http.HttpStatus
 import org.springframework.security.core.annotation.AuthenticationPrincipal
@@ -15,38 +9,40 @@ import org.springframework.transaction.annotation.Isolation
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.web.bind.annotation.*
 import ru.embroidery.shop.ApiFailure
+import ru.embroidery.shop.Page
+import ru.embroidery.shop.Pagination
 import ru.embroidery.shop.auth.Actor
 import ru.embroidery.shop.auth.Role
 import ru.embroidery.shop.auth.normalizedEmail
+import ru.embroidery.shop.badRequest
+import ru.embroidery.shop.catalog.Availability
+import ru.embroidery.shop.catalog.ProductRepository
 import ru.embroidery.shop.conflict
-import ru.embroidery.shop.files.FilePurpose
 import ru.embroidery.shop.files.OrderFileRepository
 import ru.embroidery.shop.mail.ShopMail
 import java.util.UUID
 
-data class NewDraft(
-    @field:NotBlank @field:Email @field:Size(max = 254) val email: String,
-    val garment: Garment,
-    @field:NotBlank @field:Size(max = 24) val size: String,
-    @field:NotBlank @field:Size(max = 80) val color: String,
-    @field:Size(max = 2000) val description: String = ""
-)
-
-data class DraftCreated(val id: UUID)
-data class Quote(@field:Min(2) @field:Max(9_007_199_254_740_991) val totalKopecks: Long,
-                 @field:Positive val productionDays: Int)
-data class PublishSketch(val fileId: UUID)
-data class Shipment(@field:NotBlank @field:Size(max = 120) val trackingNumber: String)
-
 @Service
 class Orders(
     private val orders: OrderRepository,
+    private val products: ProductRepository,
+    private val deliveries: OrderDeliveryRepository,
     private val files: OrderFileRepository,
     private val mail: ShopMail
 ) {
     fun createDraft(input: NewDraft) = DraftCreated(
-        orders.create(normalizedEmail(input.email), input.garment, input.size.trim(), input.color.trim(), input.description.trim())
+        orders.createCustomDraft(normalizedEmail(input.email), input)
     )
+
+    @Transactional
+    fun createCatalogDraft(input: NewCatalogDraft): DraftCreated {
+        val contact = input.delivery.normalized()
+        val selection = products.publishedVariant(input.catalogSlug, input.variantId)
+        if (selection.variant.availability == Availability.OUT_OF_STOCK) conflict("Product variant is out of stock")
+        val id = orders.createCatalogDraft(normalizedEmail(input.email), input.catalogSlug, selection)
+        deliveries.saveContact(id, contact)
+        return DraftCreated(id)
+    }
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     fun details(actor: Actor, id: UUID): OrderDetails {
@@ -54,7 +50,11 @@ class Orders(
         return snapshot(id)
     }
 
-    fun list() = orders.listSubmitted()
+    fun list(page: Pagination, type: OrderType?, status: OrderStatus?, search: String?): Page<Order> {
+        val term = search?.let(::normalizedEmail)?.takeIf { it.isNotEmpty() }
+        if (term != null && term.length > 254) badRequest("Search must be an order ID or an email")
+        return orders.listSubmitted(page, type, status, term)
+    }
 
     @Transactional
     fun submit(actor: Actor, id: UUID): OrderDetails {
@@ -62,7 +62,9 @@ class Orders(
         val order = orders.lock(id)
         if (order.status == OrderStatus.IN_REVIEW) return snapshot(id)
         order.requireStatus(OrderStatus.DRAFT)
-        if (orders.sources(id).isEmpty()) conflict("Upload a source photo before submitting")
+        if (order.type == OrderType.CUSTOM_PHOTO && orders.sources(id).isEmpty()) {
+            conflict("Upload a source photo before submitting")
+        }
         orders.setStatus(id, OrderStatus.IN_REVIEW)
         return snapshot(id)
     }
@@ -70,10 +72,11 @@ class Orders(
     @Transactional
     fun quote(id: UUID, quote: Quote): OrderDetails {
         val order = orders.lock(id)
+        order.requireType(OrderType.CUSTOM_PHOTO)
         order.requireStatus(OrderStatus.IN_REVIEW)
-        orders.setQuote(id, quote.totalKopecks, quote.productionDays)
+        orders.setQuote(id, quote)
         // The first payment gets the extra kopeck when the total is odd.
-        val deposit = quote.totalKopecks / 2 + quote.totalKopecks % 2
+        val deposit = quote.itemKopecks / 2 + quote.itemKopecks % 2
         orders.addPayment(id, Installment.DEPOSIT, deposit)
         mail.notifyCustomer(id, order.email, "Цена и срок заказа готовы")
         return snapshot(id)
@@ -82,6 +85,7 @@ class Orders(
     @Transactional
     fun publishSketch(id: UUID, fileId: UUID): OrderDetails {
         val order = orders.lock(id)
+        order.requireType(OrderType.CUSTOM_PHOTO)
         order.requireStatus(OrderStatus.PREPARING_SKETCH, OrderStatus.SKETCH_REVIEW, OrderStatus.CHANGES_REQUESTED)
         val latest = orders.latestSketch(id)
         if (latest?.fileId == fileId && order.status == OrderStatus.SKETCH_REVIEW) return snapshot(id)
@@ -96,6 +100,7 @@ class Orders(
     fun approve(actor: Actor, id: UUID, sketchId: UUID): OrderDetails {
         requireCustomer(actor, id)
         val order = orders.lock(id)
+        order.requireType(OrderType.CUSTOM_PHOTO)
         val latest = currentSketch(id, sketchId)
         if (latest.approvedAt != null) return snapshot(id)
         order.requireStatus(OrderStatus.SKETCH_REVIEW)
@@ -108,6 +113,7 @@ class Orders(
     fun requestChanges(actor: Actor, id: UUID, sketchId: UUID): OrderDetails {
         requireCustomer(actor, id)
         val order = orders.lock(id)
+        order.requireType(OrderType.CUSTOM_PHOTO)
         currentSketch(id, sketchId)
         if (order.status == OrderStatus.CHANGES_REQUESTED) return snapshot(id)
         order.requireStatus(OrderStatus.SKETCH_REVIEW)
@@ -118,11 +124,67 @@ class Orders(
     @Transactional
     fun completeProduction(id: UUID): OrderDetails {
         val order = orders.lock(id)
-        order.requireStatus(OrderStatus.IN_PRODUCTION)
-        val deposit = orders.payments(id).single { it.installment == Installment.DEPOSIT }
-        orders.addPayment(id, Installment.BALANCE, requireNotNull(order.totalKopecks) - deposit.amountKopecks)
-        orders.setStatus(id, OrderStatus.AWAITING_BALANCE)
-        mail.notifyCustomer(id, order.email, "Заказ готов к доплате")
+        when (order.type) {
+            OrderType.CUSTOM_PHOTO -> {
+                order.requireStatus(OrderStatus.IN_PRODUCTION)
+                orders.setStatus(id, OrderStatus.AWAITING_DELIVERY_QUOTE)
+                mail.notifyCustomer(id, order.email, "Вышивка готова")
+            }
+            OrderType.CATALOG -> {
+                order.requireStatus(OrderStatus.PREPARING_ORDER)
+                orders.setStatus(id, OrderStatus.READY_TO_SHIP)
+            }
+        }
+        return snapshot(id)
+    }
+
+    @Transactional
+    fun updateDelivery(actor: Actor, id: UUID, contact: DeliveryContact): OrderDetails {
+        requireCustomer(actor, id)
+        val order = orders.lock(id)
+        when (order.type) {
+            OrderType.CATALOG -> order.requireStatus(OrderStatus.DRAFT, OrderStatus.IN_REVIEW)
+            OrderType.CUSTOM_PHOTO -> order.requireStatus(
+                OrderStatus.AWAITING_DEPOSIT, OrderStatus.PREPARING_SKETCH, OrderStatus.SKETCH_REVIEW,
+                OrderStatus.CHANGES_REQUESTED, OrderStatus.IN_PRODUCTION, OrderStatus.AWAITING_DELIVERY_QUOTE
+            )
+        }
+        deliveries.saveContact(id, contact.normalized())
+        return snapshot(id)
+    }
+
+    @Transactional
+    fun quoteDelivery(id: UUID, quote: DeliveryQuote): OrderDetails {
+        val order = orders.lock(id)
+        when (order.type) {
+            OrderType.CATALOG -> order.requireStatus(OrderStatus.IN_REVIEW)
+            OrderType.CUSTOM_PHOTO -> order.requireStatus(OrderStatus.AWAITING_DELIVERY_QUOTE)
+        }
+        val total = requireNotNull(order.itemKopecks) + quote.priceKopecks
+        if (total > MAX_KOPECKS) badRequest("Order total exceeds the supported amount")
+        deliveries.setQuote(id, quote)
+        when (order.type) {
+            OrderType.CATALOG -> {
+                orders.addPayment(id, Installment.FULL, total)
+                orders.setStatus(id, OrderStatus.AWAITING_PAYMENT)
+                mail.notifyCustomer(id, order.email, "Заказ готов к оплате")
+            }
+            OrderType.CUSTOM_PHOTO -> {
+                val deposit = orders.payments(id).single { it.installment == Installment.DEPOSIT }
+                orders.addPayment(id, Installment.BALANCE, total - deposit.amountKopecks)
+                orders.setStatus(id, OrderStatus.AWAITING_BALANCE)
+                mail.notifyCustomer(id, order.email, "Заказ готов к доплате")
+            }
+        }
+        return snapshot(id)
+    }
+
+    @Transactional
+    fun reject(id: UUID, reason: String): OrderDetails {
+        val order = orders.lock(id)
+        order.requireStatus(OrderStatus.IN_REVIEW)
+        orders.reject(id, reason)
+        mail.notifyCustomer(id, order.email, "Заявка отклонена")
         return snapshot(id)
     }
 
@@ -141,6 +203,10 @@ class Orders(
                 order.requireStatus(OrderStatus.AWAITING_BALANCE)
                 OrderStatus.READY_TO_SHIP
             }
+            Installment.FULL -> {
+                order.requireStatus(OrderStatus.AWAITING_PAYMENT)
+                OrderStatus.PREPARING_ORDER
+            }
         }
         orders.markPaid(paymentId)
         orders.setStatus(id, nextStatus)
@@ -156,7 +222,17 @@ class Orders(
         return snapshot(id)
     }
 
-    private fun snapshot(id: UUID) = OrderDetails(orders.get(id), orders.sources(id), orders.latestSketch(id), orders.payments(id))
+    private fun snapshot(id: UUID): OrderDetails {
+        val order = orders.get(id)
+        return OrderDetails(
+            order = order,
+            catalogItem = if (order.type == OrderType.CATALOG) orders.catalogItem(id) else null,
+            delivery = deliveries.get(id),
+            sourceFileIds = orders.sources(id),
+            sketch = orders.latestSketch(id),
+            payments = orders.payments(id)
+        )
+    }
 
     private fun currentSketch(id: UUID, sketchId: UUID): Sketch {
         val latest = orders.latestSketch(id)
@@ -176,8 +252,19 @@ class OrderController(private val orders: Orders) {
     @ResponseStatus(HttpStatus.CREATED)
     fun create(@Valid @RequestBody input: NewDraft) = orders.createDraft(input)
 
+    @PostMapping("/api/orders/catalog-drafts")
+    @ResponseStatus(HttpStatus.CREATED)
+    fun createCatalog(@Valid @RequestBody input: NewCatalogDraft) = orders.createCatalogDraft(input)
+
     @GetMapping("/api/orders/{id}")
     fun details(@AuthenticationPrincipal actor: Actor, @PathVariable id: UUID) = orders.details(actor, id)
+
+    @PutMapping("/api/orders/{id}/delivery")
+    fun delivery(
+        @AuthenticationPrincipal actor: Actor,
+        @PathVariable id: UUID,
+        @Valid @RequestBody contact: DeliveryContact
+    ) = orders.updateDelivery(actor, id, contact)
 
     @PostMapping("/api/orders/{id}/submit")
     fun submit(@AuthenticationPrincipal actor: Actor, @PathVariable id: UUID) = orders.submit(actor, id)
@@ -191,10 +278,25 @@ class OrderController(private val orders: Orders) {
         orders.requestChanges(actor, id, sketchId)
 
     @GetMapping("/api/staff/orders")
-    fun list() = orders.list()
+    fun list(
+        @RequestParam(defaultValue = "0") page: Int,
+        @RequestParam(defaultValue = "24") size: Int,
+        @RequestParam(required = false) type: OrderType?,
+        @RequestParam(required = false) status: OrderStatus?,
+        @RequestParam(required = false) search: String?
+    ) = orders.list(Pagination(page, size), type, status, search)
+
+    @GetMapping("/api/staff/orders/{id}")
+    fun staffDetails(@AuthenticationPrincipal actor: Actor, @PathVariable id: UUID) = orders.details(actor, id)
 
     @PostMapping("/api/staff/orders/{id}/quote")
     fun quote(@PathVariable id: UUID, @Valid @RequestBody input: Quote) = orders.quote(id, input)
+
+    @PostMapping("/api/staff/orders/{id}/delivery-quote")
+    fun quoteDelivery(@PathVariable id: UUID, @Valid @RequestBody input: DeliveryQuote) = orders.quoteDelivery(id, input)
+
+    @PostMapping("/api/staff/orders/{id}/reject")
+    fun reject(@PathVariable id: UUID, @Valid @RequestBody input: Rejection) = orders.reject(id, input.reason.trim())
 
     @PostMapping("/api/staff/orders/{id}/sketches")
     fun sketch(@PathVariable id: UUID, @RequestBody input: PublishSketch) = orders.publishSketch(id, input.fileId)
