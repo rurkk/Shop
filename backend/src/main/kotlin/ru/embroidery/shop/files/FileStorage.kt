@@ -38,6 +38,7 @@ import java.util.concurrent.Semaphore
 import javax.imageio.ImageIO
 
 data class UploadedFile(val id: UUID, val mediaType: String, val byteSize: Long)
+data class ValidatedImage(val path: Path, val mediaType: String, val byteSize: Long)
 
 @Configuration
 class StorageConfiguration {
@@ -70,79 +71,56 @@ class StorageConfiguration {
 }
 
 @Service
-class FileStorage(
-    private val s3: S3Client,
-    settings: ShopSettings,
-    private val repository: OrderFileRepository,
-    private val db: JdbcClient
-) {
+class ImageStorage(private val s3: S3Client, settings: ShopSettings) {
     private val uploads = Semaphore(3)
     private val bucket = settings.storage.bucket
-    private val logger = LoggerFactory.getLogger(javaClass)
 
-    fun upload(actor: Actor, orderId: UUID, purpose: FilePurpose, part: MultipartFile): UploadedFile {
-        actor.requireOrder(orderId)
+    fun <T> withValidatedImage(part: MultipartFile, action: (ValidatedImage) -> T): T {
         if (part.isEmpty) throw ApiFailure(HttpStatus.BAD_REQUEST, "Upload a non-empty file")
         if (!uploads.tryAcquire()) throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "Too many active uploads")
         try {
-            val temporary = Files.createTempFile("order-photo-", ".upload")
+            val temporary = Files.createTempFile("shop-image-", ".upload")
             try {
                 part.transferTo(temporary.toFile())
-                val mediaType = validateImage(temporary)
-                val file = repository.reserve(actor, orderId, purpose, mediaType, Files.size(temporary))
-                s3.putObject(
-                    { it.bucket(bucket).key(file.objectKey).contentType(mediaType) },
-                    RequestBody.fromFile(temporary)
-                )
-                repository.complete(actor, file)
-                return UploadedFile(file.id, file.mediaType, file.byteSize)
+                return action(ValidatedImage(temporary, validateImage(temporary), Files.size(temporary)))
             } finally {
                 Files.deleteIfExists(temporary)
             }
-        } catch (_: SdkException) {
-            throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "File storage is temporarily unavailable")
         } finally {
             uploads.release()
         }
     }
 
-    fun download(actor: Actor, orderId: UUID, fileId: UUID): ResponseEntity<StreamingResponseBody> {
-        actor.requireOrder(orderId)
-        val file = repository.visibleTo(actor, orderId, fileId)
-        val body = StreamingResponseBody { output ->
-            s3.getObject { it.bucket(bucket).key(file.objectKey) }.use { source -> source.transferTo(output) }
+    fun put(objectKey: String, image: ValidatedImage) {
+        try {
+            s3.putObject(
+                { it.bucket(bucket).key(objectKey).contentType(image.mediaType) },
+                RequestBody.fromFile(image.path)
+            )
+        } catch (_: SdkException) {
+            throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "File storage is temporarily unavailable")
         }
-        return ResponseEntity.ok()
-            .cacheControl(CacheControl.noStore())
-            .header(HttpHeaders.CONTENT_DISPOSITION, "inline")
-            .contentLength(file.byteSize)
-            .contentType(MediaType.parseMediaType(file.mediaType))
-            .body(body)
     }
 
-    @Scheduled(fixedDelay = 300_000, initialDelay = 30_000)
-    fun removeExpiredUploads() {
-        db.sql("""
-            UPDATE orders SET status = 'EXPIRED', updated_at = now()
-            WHERE status = 'DRAFT' AND created_at <= now() - interval '1 day'
-        """).update()
-        val files = db.sql("""
-            SELECT f.id, f.order_id FROM order_files f JOIN orders o ON o.id = f.order_id
-            WHERE o.status = 'EXPIRED' OR (NOT f.ready AND f.created_at <= now() - interval '1 hour')
-            ORDER BY f.created_at, f.id LIMIT 25
-        """).query { rs, _ -> rs.getObject("order_id", UUID::class.java) to rs.getObject("id", UUID::class.java) }.list()
-        for ((orderId, fileId) in files) {
-            try {
-                s3.deleteObject { it.bucket(bucket).key("orders/$orderId/$fileId") }
-                db.sql("DELETE FROM order_files WHERE id = :id").param("id", fileId).update()
-            } catch (error: SdkException) {
-                logger.warn("Could not delete an expired upload ({})", error.javaClass.simpleName)
-            }
+    fun delete(objectKey: String) {
+        s3.deleteObject { it.bucket(bucket).key(objectKey) }
+    }
+
+    fun download(
+        objectKey: String,
+        mediaType: String,
+        byteSize: Long,
+        cacheControl: CacheControl = CacheControl.noStore()
+    ): ResponseEntity<StreamingResponseBody> {
+        val body = StreamingResponseBody { output ->
+            s3.getObject { it.bucket(bucket).key(objectKey) }.use { source -> source.transferTo(output) }
         }
-        db.sql("""
-            DELETE FROM orders o WHERE o.status = 'EXPIRED'
-              AND NOT EXISTS (SELECT 1 FROM order_files f WHERE f.order_id = o.id)
-        """).update()
+        return ResponseEntity.ok()
+            .cacheControl(cacheControl)
+            .header(HttpHeaders.CONTENT_DISPOSITION, "inline")
+            .contentLength(byteSize)
+            .contentType(MediaType.parseMediaType(mediaType))
+            .body(body)
     }
 
     private fun validateImage(file: Path): String {
@@ -181,6 +159,56 @@ class FileStorage(
 
     private fun invalidImage(): Nothing =
         throw ApiFailure(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "Upload a valid JPEG or PNG image")
+}
+
+@Service
+class FileStorage(
+    private val storage: ImageStorage,
+    private val repository: OrderFileRepository,
+    private val db: JdbcClient
+) {
+    private val logger = LoggerFactory.getLogger(javaClass)
+
+    fun upload(actor: Actor, orderId: UUID, purpose: FilePurpose, part: MultipartFile): UploadedFile {
+        actor.requireOrder(orderId)
+        return storage.withValidatedImage(part) { image ->
+            val file = repository.reserve(actor, orderId, purpose, image.mediaType, image.byteSize)
+            storage.put(file.objectKey, image)
+            repository.complete(actor, file)
+            UploadedFile(file.id, file.mediaType, file.byteSize)
+        }
+    }
+
+    fun download(actor: Actor, orderId: UUID, fileId: UUID): ResponseEntity<StreamingResponseBody> {
+        actor.requireOrder(orderId)
+        val file = repository.visibleTo(actor, orderId, fileId)
+        return storage.download(file.objectKey, file.mediaType, file.byteSize)
+    }
+
+    @Scheduled(fixedDelay = 300_000, initialDelay = 30_000)
+    fun removeExpiredUploads() {
+        db.sql("""
+            UPDATE orders SET status = 'EXPIRED', updated_at = now()
+            WHERE status = 'DRAFT' AND created_at <= now() - interval '1 day'
+        """).update()
+        val files = db.sql("""
+            SELECT f.id, f.order_id FROM order_files f JOIN orders o ON o.id = f.order_id
+            WHERE o.status = 'EXPIRED' OR (NOT f.ready AND f.created_at <= now() - interval '1 hour')
+            ORDER BY f.created_at, f.id LIMIT 25
+        """).query { rs, _ -> rs.getObject("order_id", UUID::class.java) to rs.getObject("id", UUID::class.java) }.list()
+        for ((orderId, fileId) in files) {
+            try {
+                storage.delete("orders/$orderId/$fileId")
+                db.sql("DELETE FROM order_files WHERE id = :id").param("id", fileId).update()
+            } catch (error: SdkException) {
+                logger.warn("Could not delete an expired upload ({})", error.javaClass.simpleName)
+            }
+        }
+        db.sql("""
+            DELETE FROM orders o WHERE o.status = 'EXPIRED'
+              AND NOT EXISTS (SELECT 1 FROM order_files f WHERE f.order_id = o.id)
+        """).update()
+    }
 }
 
 @RestController

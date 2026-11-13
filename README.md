@@ -40,7 +40,31 @@ python3 infra/tests/smoke.py
 
 Чат доступен после отправки черновика. `GET /api/orders/{id}/messages` возвращает последние сообщения и `lastSequence`, параметр `before` открывает предыдущую страницу. Отправка идёт через `POST /api/orders/{id}/messages` с `clientMessageId` для безопасного повтора. Подписка `GET /api/orders/{id}/messages/stream?after={lastSequence}` передаёт события `message.created`. При переподключении сервер использует заголовок `Last-Event-ID`, если браузер его передал.
 
-Сумма делится на предоплату и доплату перед отправкой. Тестовые подтверждения включаются только локальным профилем. В составе первого этапа также нет каталога «Русь», выбора доставки и интеграции с Instagram.
+Сумма делится на предоплату и доплату перед отправкой. Тестовые подтверждения включаются только локальным профилем. Заказ из каталога, выбор доставки и интеграция с Instagram запланированы на следующие этапы.
+
+## Каталоги
+
+После миграции в PostgreSQL доступны пустые «Выбор команды» (`team-choice`, тип `SELECTION`) и «Русь» (`rus`, тип `COLLECTION`). Порядок показа коллекций задаёт `displayOrder`. Каталоги используют общие маршруты, а один товар можно разместить в нескольких каталогах.
+
+| Публичный API | Результат |
+| --- | --- |
+| `GET /api/catalogs` | Опубликованные каталоги с типом, описанием, обложкой и порядком |
+| `GET /api/catalogs/{slug}` | Объект `catalog` и страница `products` с названием, обложкой и ценой от для каждого товара |
+| `GET /api/catalogs/{slug}/products/{productSlug}` | Опубликованный товар в выбранном каталоге, упорядоченные фото и варианты с ID, SKU, размером, цветом, ценой и наличием |
+
+Списки принимают `page` с нуля и `size` от 1 до 100 (по умолчанию 24). Страница возвращает `items`, `page`, `size` и `hasMore`. Суммы в копейках. Поля `cover` и `images` содержат ссылки вида `{id, url}`. Фото выдаются по указанному `url` и доступны покупателю, пока опубликован хотя бы один связанный каталог или товар в опубликованном каталоге.
+
+| API сотрудников | Действие |
+| --- | --- |
+| `GET /api/staff/catalogs`, `GET /api/staff/catalogs/{id}` | Посмотреть каталоги и привязанные товары, включая черновики |
+| `POST /api/staff/catalogs`, `PUT /api/staff/catalogs/{id}` | Создать или заменить каталог. Поля `slug`, `name`, `kind`, `description`, `coverImageId`, `displayOrder`, `published` |
+| `PUT /api/staff/catalogs/{id}/products/{productId}`, `DELETE /api/staff/catalogs/{id}/products/{productId}` | Привязать товар с полем `displayOrder`, изменить порядок или убрать товар |
+| `GET /api/staff/products`, `GET /api/staff/products/{id}` | Посмотреть товары, включая черновики |
+| `POST /api/staff/products`, `PUT /api/staff/products/{id}` | Создать черновик или заменить товар. Поля `slug`, `name`, `design`, `garmentType`, `description`, `imageIds`, `published` |
+| `POST /api/staff/products/{id}/variants`, `PUT /api/staff/products/{id}/variants/{variantId}`, `DELETE /api/staff/products/{id}/variants/{variantId}` | Создать, изменить или удалить вариант. Поля `sku`, `size`, `color`, `priceKopecks`, `availability`, `productionDays` |
+| `POST /api/staff/catalog-images`, `GET /api/staff/catalog-images/{id}`, `DELETE /api/staff/catalog-images/{id}` | Загрузить JPEG или PNG до 10 МиБ в поле multipart `file`, открыть фото для предпросмотра или удалить его после снятия всех привязок |
+
+Для публикации товара нужны хотя бы одно фото и один вариант. Первое фото в `imageIds` становится обложкой. Вариант имеет наличие `IN_STOCK`, `MADE_TO_ORDER` или `OUT_OF_STOCK`. Для `MADE_TO_ORDER` указывают `productionDays`. Наличие задаёт сотрудник, правила резерва будут частью оформления заказа. Для записи нужны роль сотрудника, cookie сессии и CSRF-токен. Повторяющийся `slug`, SKU или сочетание размера и цвета в одном товаре возвращает `409`.
 
 ## Один сервер
 

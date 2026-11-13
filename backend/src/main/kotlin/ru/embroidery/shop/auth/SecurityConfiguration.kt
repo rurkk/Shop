@@ -59,6 +59,8 @@ class SecurityConfiguration {
         .authorizeHttpRequests {
             it.dispatcherTypeMatchers(DispatcherType.ERROR, DispatcherType.ASYNC).permitAll()
             it.requestMatchers(HttpMethod.GET, "/actuator/health/liveness", "/actuator/health/readiness", "/api/csrf").permitAll()
+            it.requestMatchers(HttpMethod.GET, "/api/catalogs", "/api/catalogs/**", "/api/catalog-images/*").permitAll()
+            it.requestMatchers(HttpMethod.HEAD, "/api/catalogs", "/api/catalogs/**", "/api/catalog-images/*").permitAll()
             it.requestMatchers(
                 HttpMethod.POST, "/api/orders/drafts", "/api/orders/*/access/code", "/api/orders/*/access/verify",
                 "/api/staff/access/code", "/api/staff/access/verify"

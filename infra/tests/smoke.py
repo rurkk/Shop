@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the local stack using only public HTTP endpoints."""
+"""Exercise the local stack through Nginx using the HTTP API."""
 
 import http.cookiejar
 import json
@@ -59,13 +59,16 @@ class Browser:
         return next(cookie.value for cookie in self.cookies if cookie.name == "JSESSIONID")
 
     def upload(self, order, purpose, image, expected=201):
+        return self.upload_image(f"{order}/files?purpose={purpose}", image, expected)
+
+    def upload_image(self, route, image, expected=201):
         boundary = "smoke-" + uuid.uuid4().hex
         body = (
             f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="photo.png"\r\n'
             "Content-Type: image/png\r\n\r\n"
         ).encode() + image + f"\r\n--{boundary}--\r\n".encode()
         return self.call(
-            f"{order}/files?purpose={purpose}", "POST", expected=expected, data=body,
+            route, "POST", expected=expected, data=body,
             headers={"Content-Type": "multipart/form-data; boundary=" + boundary},
         )
 
@@ -154,6 +157,107 @@ def status(snapshot, expected):
     assert snapshot["order"]["status"] == expected, snapshot["order"]["status"]
 
 
+def check_catalogs(staff, buyer, run):
+    visitor = Browser()
+    catalogs = "/api/catalogs"
+    staff_catalogs = "/api/staff/catalogs"
+    staff_products = "/api/staff/products"
+    staff_images = "/api/staff/catalog-images"
+
+    entries = visitor.call(catalogs)["items"]
+    assert entries[0]["slug"] == "team-choice" and entries[0]["kind"] == "SELECTION"
+    rus = visitor.call(catalogs + "/rus")
+    assert rus["catalog"]["name"] == "Русь" and rus["products"]["items"] == []
+    visitor.call(catalogs + "?size=101", expected=400)
+    visitor.call(staff_catalogs, expected=401)
+    buyer.call(staff_catalogs, expected=403)
+    staff.call(staff_catalogs, "POST", {}, expected=403, csrf=False)
+
+    visitor_image = png()
+    staff.upload_image(staff_images, b"not an image", expected=415)
+    upload = staff.upload_image(staff_images, visitor_image)
+    image_id = upload["id"]
+    public_image = f"/api/catalog-images/{image_id}"
+    assert staff.call(upload["url"]) == visitor_image
+    visitor.call(public_image, expected=404)
+    buyer.call(upload["url"], expected=403)
+
+    slug = f"test-catalog-{run}"
+    form = {"slug": slug, "name": "Тестовая витрина", "kind": "COLLECTION", "displayOrder": 20}
+    draft_catalog = staff.call(staff_catalogs, "POST", form, expected=201)
+    staff.call(staff_catalogs, "POST", form, expected=409)
+    public_catalog = f"{catalogs}/{slug}"
+    catalog = f"{staff_catalogs}/{draft_catalog['id']}"
+    visitor.call(public_catalog, expected=404)
+    assert any(item["id"] == draft_catalog["id"] for item in staff.call(staff_catalogs)["items"])
+    assert staff.call(catalog)["products"]["items"] == []
+
+    product_slug = f"test-hoodie-{run}"
+    product = {
+        "slug": product_slug, "name": "Тестовое худи", "design": "Тестовый дизайн",
+        "garmentType": "Худи", "imageIds": [image_id],
+    }
+    draft = staff.call(staff_products, "POST", product, expected=201)
+    product_id = draft["id"]
+    product_route = f"{staff_products}/{product_id}"
+    public_product = f"{public_catalog}/products/{product_slug}"
+    published_product = dict(product, published=True)
+    staff.call(product_route, "PUT", published_product, expected=409)
+    staff.call(f"{catalog}/products/{product_id}", "PUT", {"displayOrder": 5}, expected=204)
+    staff.call(catalog, "PUT", dict(form, published=True))
+    assert visitor.call(public_catalog)["products"]["items"] == []
+    visitor.call(public_product, expected=404)
+    visitor.call(public_image, expected=404)
+
+    variant = {
+        "sku": f"TEST-{run.upper()}-M", "size": "M", "color": "Чёрный",
+        "priceKopecks": 299000, "availability": "MADE_TO_ORDER", "productionDays": 7,
+    }
+    variants_route = product_route + "/variants"
+    staff.call(variants_route, "POST", dict(variant, productionDays=None), expected=400)
+    staff.call(variants_route, "POST", dict(variant, priceKopecks=299000.5), expected=400)
+    made = staff.call(variants_route, "POST", variant, expected=201)
+    staff.call(variants_route, "POST", dict(variant, size="L"), expected=409)
+    staff.call(variants_route, "POST", dict(variant, sku=variant["sku"] + "-B", size="m"), expected=409)
+    variant_route = f"{variants_route}/{made['id']}"
+    stock = staff.call(variant_route, "PUT", dict(variant, availability="IN_STOCK", productionDays=None))
+    assert stock["id"] == made["id"] and stock["availability"] == "IN_STOCK"
+    staff.call(product_route, "PUT", published_product)
+    staff.call(variant_route, "DELETE", expected=409)
+
+    team_catalog = entries[0]["id"]
+    team_placement = f"{staff_catalogs}/{team_catalog}/products/{product_id}"
+    staff.call(team_placement, "PUT", {"displayOrder": 40}, expected=204)
+    try:
+        assert visitor.call(public_product)["variants"] == [stock]
+        row = visitor.call(public_catalog)["products"]["items"][0]
+        assert row["fromPriceKopecks"] == stock["priceKopecks"] and row["displayOrder"] == 5
+        assert row["cover"]["url"] == public_image
+        with open_url(visitor.opener, SHOP + public_image) as response:
+            assert response.read() == visitor_image
+            assert "no-cache" in response.headers["Cache-Control"]
+            cache_headers = {"If-None-Match": response.headers["ETag"]}
+        visitor.call(public_image, headers=cache_headers, expected=304)
+        team = visitor.call(catalogs + "/team-choice")["products"]["items"]
+        assert any(item["id"] == product_id and item["displayOrder"] == 40 for item in team)
+        second_page = visitor.call(catalogs + "?size=1&page=1")
+        assert second_page["items"][0]["slug"] == "rus" and second_page["hasMore"]
+        staff.call(upload["url"], "DELETE", expected=409)
+
+        staff.call(catalog, "PUT", form)
+        visitor.call(public_product, expected=404)
+        assert visitor.call(f"{catalogs}/team-choice/products/{product_slug}")["id"] == product_id
+    finally:
+        staff.call(team_placement, "DELETE", expected=204)
+        staff.call(catalog, "PUT", form)
+
+    visitor.call(public_image, headers=cache_headers, expected=404)
+    staff.call(product_route, "PUT", dict(product, imageIds=[]))
+    staff.call(upload["url"], "DELETE", expected=204)
+    staff.call(upload["url"], expected=404)
+    print("Verified multiple catalogs, staff permissions, variants, publication, and catalog images", flush=True)
+
+
 def main():
     buyer, staff, other = Browser(), Browser(), Browser()
     run = uuid.uuid4().hex[:12]
@@ -179,6 +283,7 @@ def main():
     status(buyer.call(order + "/submit", "POST"), "IN_REVIEW")
     log_in(staff, "/api/staff/access", STAFF)
     assert any(item["id"] == order.rsplit("/", 1)[-1] for item in staff.call("/api/staff/orders"))
+    check_catalogs(staff, buyer, run)
 
     print("Verified order access, CSRF, and private S3 upload/download", flush=True)
     quote = staff.call(staff_order + "/quote", "POST", {"totalKopecks": 175001, "productionDays": 7})

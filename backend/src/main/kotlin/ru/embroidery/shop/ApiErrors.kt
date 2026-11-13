@@ -1,11 +1,13 @@
 package ru.embroidery.shop
 
+import org.springframework.dao.DuplicateKeyException
 import org.springframework.http.HttpStatus
 import org.springframework.http.ProblemDetail
 import org.springframework.http.converter.HttpMessageNotReadableException
 import org.springframework.web.bind.MethodArgumentNotValidException
 import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.RestControllerAdvice
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException
 import org.springframework.web.multipart.MaxUploadSizeExceededException
 import org.springframework.web.multipart.support.MissingServletRequestPartException
 
@@ -21,8 +23,11 @@ class ApiErrors {
     fun failure(error: ApiFailure): ProblemDetail = ProblemDetail.forStatusAndDetail(error.status, error.message!!)
 
     @ExceptionHandler(HttpMessageNotReadableException::class, MethodArgumentNotValidException::class,
-        MissingServletRequestPartException::class)
+        MissingServletRequestPartException::class, MethodArgumentTypeMismatchException::class)
     fun invalidRequest(): ProblemDetail = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "Invalid request")
+
+    @ExceptionHandler(DuplicateKeyException::class)
+    fun duplicate(): ProblemDetail = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, "Value already exists")
 
     @ExceptionHandler(MaxUploadSizeExceededException::class)
     fun oversizedUpload(): ProblemDetail = ProblemDetail.forStatusAndDetail(

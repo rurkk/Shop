@@ -27,7 +27,7 @@ jobs:
         run: ./backend/gradlew -p backend --no-daemon check bootJar
       - name: Start test stack
         run: docker compose --env-file .env.example -f compose.yaml -f compose.local.yaml up --build --wait --wait-timeout 120
-      - name: Exercise custom order via Nginx
+      - name: Exercise catalogs and custom orders via Nginx
         run: python3 infra/tests/smoke.py
       - name: Print logs on failure
         if: failure()
