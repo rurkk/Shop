@@ -7,7 +7,7 @@
 | Адрес демо | `https://demo.knitsew.ru`. Для показа используем отдельные тома, вымышленные данные заказов, тестовые изображения и почтовые ящики |
 | Почта и платежи демо | [Yandex Cloud Postbox](https://yandex.cloud/ru/docs/postbox/quickstart) для писем, [тестовый магазин ЮKassa](https://yookassa.ru/developers/payment-acceptance/testing-and-going-live/testing) для оплаты |
 
-VPS активен, домен зарегистрирован, DNS проверен. Первый вход в консоль VPS выполнен. Для первого деплоя нужно установить и проверить SSH-ключ, подготовить Docker, сертификат и настройки почты и тестового магазина. [Боевой контур на ATLEX](requirements.md#размещение) и [подготовка к приёму настоящих заказов](legal-launch.md) описаны отдельно.
+VPS активен, домен зарегистрирован, DNS проверен. Для первого деплоя подготовьте доступ по SSH, Docker, сертификат и почту. Тестовый магазин ЮKassa можно подключить после запуска демо. [Боевой контур на ATLEX](requirements.md#размещение) и [подготовка к приёму настоящих заказов](legal-launch.md) описаны отдельно.
 
 ## Доступ по SSH
 
@@ -145,23 +145,18 @@ SHOP_SMTP_PORT=587
 | `SHOP_S3_BUCKET`, `SHOP_S3_ACCESS_KEY`, `SHOP_S3_SECRET_KEY` | Бакет `order-files` и отдельная случайная пара ключей SeaweedFS |
 | `SHOP_CODE_SECRET`, `SHOP_STAFF_TOTP_ACCOUNTS` | Секрет для кодов входа и [отдельный TOTP для каждого сотрудника](../README.md#вход-сотрудников) |
 | `SHOP_MAIL_FROM`, `SHOP_SMTP_USERNAME`, `SHOP_SMTP_PASSWORD` | Подтверждённый отправитель на `knitsew.ru` и учётные данные SMTP из Postbox |
-| `SHOP_YOOKASSA_SHOP_ID`, `SHOP_YOOKASSA_SECRET_KEY` | Идентификатор и ключ тестового магазина ЮKassa |
 
 Для паролей БД, ключей SeaweedFS и `SHOP_CODE_SECRET` можно использовать отдельные вызовы `openssl rand -hex 32`. Используйте `.env.example` как справочник по формату. Его пароли и TOTP предназначены для локальных тестов. Храните `.env.demo`, приватный SSH-ключ, приватный ключ сертификата и пароль из Instructions вне Git. Для SMTP подтвердите домен в Postbox и добавьте выданную запись DKIM в Timeweb. [Настройка Postbox](https://yandex.cloud/ru/docs/postbox/quickstart) · [Учётные данные SMTP](https://yandex.cloud/ru/docs/postbox/operations/send-email#smtp)
 
-В том же каталоге сохраните `compose.demo.yaml`. Он использует HTTPS и SMTP из `compose.prod.yaml` и включает тестовый магазин через профиль `demo`. В профиле `production` интеграция отключена в коде.
+В том же каталоге сохраните `compose.demo.yaml`. Он использует профиль `demo` и настройки HTTPS и SMTP из `compose.prod.yaml`. С выключенной ЮKassa можно отправить заявку, рассчитать заказ и открыть переписку. На этапе оплаты покупатель увидит сообщение о недоступности платежа при попытке перейти к оплате.
 
 ```yaml
 services:
   backend:
     environment:
       SPRING_PROFILES_ACTIVE: demo
-      SHOP_YOOKASSA_ENABLED: "true"
-      SHOP_YOOKASSA_SHOP_ID: ${SHOP_YOOKASSA_SHOP_ID:?Set the YooKassa test shop ID}
-      SHOP_YOOKASSA_SECRET_KEY: ${SHOP_YOOKASSA_SECRET_KEY:?Set the YooKassa test shop key}
+      SHOP_YOOKASSA_ENABLED: "false"
 ```
-
-В кабинете **тестового** магазина укажите `https://demo.knitsew.ru/api/payments/yookassa/webhook` и события `payment.succeeded`, `payment.canceled`, `refund.succeeded`. [Тестовый магазин ЮKassa](https://yookassa.ru/developers/payment-acceptance/testing-and-going-live/testing)
 
 На VPS сохраните команду, которую будут использовать при выкладках и обновлении сертификата. Постоянное имя Compose-проекта `knitsew-demo` сохраняет привязку к томам базы и файлов между релизами.
 
@@ -188,7 +183,7 @@ curl -fsS -o /dev/null https://demo.knitsew.ru/admin
 curl -fsS -o /dev/null https://demo.knitsew.ru/api/csrf
 ```
 
-HTTP должен вернуть `308` на тот же адрес с `https://`. Через админку опубликуйте демонстрационную витрину. С телефона откройте сайт через мобильную сеть. Проверьте оформление заказа с тестовыми данными, получение письма, вход сотрудника с TOTP, доступ к вложению и завершение тестовой оплаты с обновлением статуса. Состояние контейнеров и свежие логи доступны через `knitsew-demo-compose ps` и `knitsew-demo-compose logs --tail 100 nginx backend frontend`.
+HTTP должен вернуть `308` на тот же адрес с `https://`. Через админку опубликуйте демонстрационную витрину. С телефона откройте сайт через мобильную сеть. Проверьте отправку заявки с тестовыми данными, получение письма, вход сотрудника с TOTP и доступ к вложению. Состояние контейнеров и свежие логи доступны через `knitsew-demo-compose ps` и `knitsew-demo-compose logs --tail 100 nginx backend frontend`.
 
 После запуска включите обновление TLS. Certbot на время проверки освобождает порт `80`, копирует обновлённые файлы и запускает Nginx. Настройка рассчитана на VPS с одним сайтом.
 
@@ -208,6 +203,24 @@ certbot renew --cert-name demo.knitsew.ru --dry-run
 systemctl enable --now certbot.timer
 systemctl list-timers certbot.timer
 ```
+
+### Тестовая оплата через ЮKassa
+
+Добавьте `SHOP_YOOKASSA_SHOP_ID` и `SHOP_YOOKASSA_SECRET_KEY` тестового магазина в `.env.demo`. В кабинете этого магазина укажите `https://demo.knitsew.ru/api/payments/yookassa/webhook` и события `payment.succeeded`, `payment.canceled`, `refund.succeeded`. [Тестовый магазин ЮKassa](https://yookassa.ru/developers/payment-acceptance/testing-and-going-live/testing)
+
+Замените содержимое `compose.demo.yaml` следующим блоком.
+
+```yaml
+services:
+  backend:
+    environment:
+      SPRING_PROFILES_ACTIVE: demo
+      SHOP_YOOKASSA_ENABLED: "true"
+      SHOP_YOOKASSA_SHOP_ID: ${SHOP_YOOKASSA_SHOP_ID:?Set the YooKassa test shop ID}
+      SHOP_YOOKASSA_SECRET_KEY: ${SHOP_YOOKASSA_SECRET_KEY:?Set the YooKassa test shop key}
+```
+
+Проверьте конфигурацию командой `knitsew-demo-compose config --quiet` и примените её командой `knitsew-demo-compose up -d --wait --wait-timeout 120`. Проведите тестовый платёж и проверьте обновление статуса заказа после уведомления от ЮKassa.
 
 ## Обновление, резервные копии и откат
 
