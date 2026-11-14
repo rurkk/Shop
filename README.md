@@ -4,6 +4,8 @@
 
 [Требования к KNITSEW](docs/requirements.md) описывают оба сценария заказа, первый полноценный релиз и архитектуру.
 
+[Доступ к VPS, DNS и деплой демо](docs/deployment.md) описаны для `demo.knitsew.ru`.
+
 ## Локальный запуск
 
 Понадобятся JDK 21, Docker с Compose v2 и Python 3 для сквозной проверки. Backend работает на Spring Boot 4.1 и Tomcat 11.
@@ -134,9 +136,11 @@ WHERE status = 'READY' AND encoding <> 'SANITIZED';
 
 Вариант имеет наличие `IN_STOCK`, `MADE_TO_ORDER` или `OUT_OF_STOCK`. Для `MADE_TO_ORDER` указывают `productionDays`. Наличие перед выставлением платежа подтверждает сотрудник. Для записи нужны роль сотрудника, cookie сессии и CSRF-токен. Повторяющийся `slug`, SKU или сочетание размера и цвета в одном товаре возвращает `409`.
 
+Для наполнения витрины из таблицы и папок с фото используйте [пакетный импорт каталога](docs/catalog-import.md).
+
 ## Один сервер
 
-Тарифы и условия описаны в [требованиях к размещению](docs/requirements.md#размещение).
+Для `demo.knitsew.ru` используйте [инструкцию по деплою](docs/deployment.md). Ниже описана общая схема запуска HTTPS и SMTP. Тарифы и условия указаны в [требованиях к размещению](docs/requirements.md#размещение).
 
 `compose.yaml` поднимает PostgreSQL, SeaweedFS, backend, Next.js и Nginx. `compose.prod.yaml` включает HTTPS и рабочий SMTP. Только Nginx публикует порты 80 и 443. PostgreSQL и S3 доступны приложению в отдельных закрытых сетях. Тома БД и S3 сохраняются между запусками.
 
