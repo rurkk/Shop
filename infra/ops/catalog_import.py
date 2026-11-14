@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Import a local KNITSEW workbook and photo pack through the staff API."""
+"""Publish and update the KNITSEW storefront from a workbook and photo pack."""
 
 import argparse
 import fcntl
@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import warnings
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -37,18 +37,26 @@ PRODUCT_SHEET = "Товары"
 GROUP_SHEET = "Группы вариантов"
 GALLERY_SHEET = "Галерея"
 MEASUREMENT_SHEET = "Замеры"
+CATALOG_SHEET = "Коллекции"
+STOREFRONT_SHEET = "Витрина"
 PRODUCT_HEADERS = (
     "Название", "Импорт", "Публикация", "Группа вариантов", "Тип изделия", "Дизайн", "Папка фото",
     "Slug", "Описание для покупателя", "Порядок", "Коллекция", "Заметка по фото", "Источник Instagram",
 )
-GROUP_HEADERS = ("Код группы", "Цвет", "Размеры", "Цена, ₽", "Наличие", "Срок, дней")
+GROUP_HEADERS = ("Код группы", "Цвет", "Размеры", "Цена, ₽", "Наличие", "Срок, дней", "SKU")
+CATALOG_HEADERS = ("Slug", "Название", "Тип", "Порядок", "Публикация", "Описание", "Фото обложки")
+STOREFRONT_HEADERS = (
+    "Публикация", "Заголовок", "Фото баннера", "Цена вышивки по фото", "Срок вышивки по фото", "Доставка из коллекции",
+)
 GALLERY_HEADERS = ("Добавить", "Подпись", "Фото вышивки", "Исходник")
 MEASUREMENT_HEADERS = ("Slug товара", "Размер", "Ширина, см", "Длина, см", "Рукав, см")
 SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+SKU = re.compile(r"[A-Z0-9][A-Z0-9_-]*")
 PHOTO_NAME = re.compile(r"(\d{2})-[a-z0-9-]+\.(?:jpe?g|png)")
 SKU_LIMIT = 64
 PRICE_LIMIT = 9_007_199_254_740_991
 AVAILABILITY = {"В наличии": "IN_STOCK", "Под заказ": "MADE_TO_ORDER", "Нет в наличии": "OUT_OF_STOCK"}
+CATALOG_KINDS = {"Коллекция": "COLLECTION", "Подборка": "SELECTION"}
 IMAGE_FORMATS = {"JPEG": "image/jpeg", "PNG": "image/png"}
 IMAGE_EXTENSIONS = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG"}
 PHOTO_CAPTIONS = {
@@ -64,6 +72,12 @@ class ImportFailure(Exception):
     pass
 
 
+class ShopHttpError(ImportFailure):
+    def __init__(self, method, route, status, detail):
+        super().__init__(f"{method} {route}: HTTP {status}. {detail}".rstrip())
+        self.status = status
+
+
 @dataclass(frozen=True)
 class Photo:
     path: Path
@@ -76,12 +90,12 @@ class Photo:
         return self.path.stem.split("-", 1)[1]
 
 
-@dataclass
+@dataclass(frozen=True)
 class Product:
     form: dict
     photos: list[Photo]
     variants: list[dict]
-    catalog: str
+    catalogs: tuple[str, ...]
     order: int
     publish: bool
 
@@ -96,10 +110,30 @@ class Product:
 
 
 @dataclass(frozen=True)
+class Catalog:
+    form: dict
+    cover: Photo | None
+
+
+@dataclass(frozen=True)
+class Storefront:
+    form: dict
+    banner: Photo | None
+
+
+@dataclass(frozen=True)
 class Example:
     embroidery: Photo
     source: Photo | None
     caption: str | None
+
+
+@dataclass(frozen=True)
+class ImportPackage:
+    products: list[Product]
+    catalogs: dict[str, Catalog]
+    storefront: Storefront
+    gallery: list[Example]
 
 
 def string(value, label, limit, optional=False):
@@ -223,13 +257,16 @@ def rows(book, sheet_name, headers):
 def variant_groups(book, problems):
     groups = {}
     pairs = {}
-    for row, (group, color, sizes, price, availability, days) in rows(book, GROUP_SHEET, GROUP_HEADERS):
+    for row, (group, color, sizes, price, availability, days, sku) in rows(book, GROUP_SHEET, GROUP_HEADERS):
         try:
             group = string(group, "Код группы", 80)
             color = string(color, "Цвет", 80)
             if type(sizes) in (int, float) and math.isfinite(sizes) and sizes == int(sizes):
                 sizes = str(int(sizes))
             sizes = [string(size, "Размер", 32) for size in string(sizes, "Размеры", 1500).split(",")]
+            sku = string(sku, "SKU", SKU_LIMIT, optional=True)
+            if sku and (len(sizes) != 1 or not SKU.fullmatch(sku)):
+                raise ImportFailure("Явный SKU задаётся для одного размера. Допустимы A–Z, цифры, дефис и подчёркивание")
             kopecks = price_kopecks(price)
             if availability not in AVAILABILITY:
                 raise ImportFailure("Выберите статус наличия")
@@ -244,7 +281,7 @@ def variant_groups(book, problems):
                 raise ImportFailure(f"В группе «{group}» повторяется сочетание размера и цвета")
             seen.update(keys)
             groups.setdefault(group, []).extend(
-                dict(size=size, color=color, priceKopecks=kopecks, availability=status, productionDays=days)
+                dict(size=size, color=color, priceKopecks=kopecks, availability=status, productionDays=days, sku=sku)
                 for size in sizes
             )
         except ImportFailure as error:
@@ -253,6 +290,8 @@ def variant_groups(book, problems):
 
 
 def variant_payload(product_slug, variant):
+    if variant["sku"]:
+        return variant
     identity = json.dumps([variant["size"].lower(), variant["color"].lower()], ensure_ascii=False)
     suffix = hashlib.sha256(identity.encode()).hexdigest()[:12].upper()
     return dict(variant, sku=f"{product_slug[:SKU_LIMIT - 13].upper()}-{suffix}")
@@ -278,11 +317,10 @@ def product_measurements(book, problems):
     return measurements
 
 
-def parse_products(book, root, problems, operation):
+def parse_products(book, root, problems):
     groups = variant_groups(book, problems)
     measurements = product_measurements(book, problems)
     products = []
-    seen_slugs = set()
     seen_orders = set()
     seen_skus = set()
     known_slugs = set()
@@ -293,14 +331,12 @@ def parse_products(book, root, problems, operation):
             publish = choice(publish, "Публикация")
             if publish and not include:
                 raise ImportFailure("Для публикации включите карточку в импорт")
-            if isinstance(key, str):
-                known_slugs.add(key.strip())
-            if not include or (operation == "publish" and not publish):
-                continue
             key = slug(key, "Slug")
-            if key in seen_slugs:
+            if key in known_slugs:
                 raise ImportFailure(f"Повторяется slug {key}")
-            seen_slugs.add(key)
+            known_slugs.add(key)
+            if not include:
+                continue
             form = dict(
                 slug=key, name=string(name, "Название", 160), garmentType=string(garment, "Тип изделия", 80),
                 design=string(design, "Дизайн", 160),
@@ -317,18 +353,66 @@ def parse_products(book, root, problems, operation):
             if len(skus) != len(variants) or skus & seen_skus:
                 raise ImportFailure("В пакете повторяется SKU")
             seen_skus.update(skus)
-            catalog = slug(catalog, "Коллекция")
+            catalogs = tuple(slug(value, "Коллекция") for value in
+                             string(catalog, "Коллекция", 1500).split(","))
+            if len(set(catalogs)) != len(catalogs):
+                raise ImportFailure("Коллекция указана несколько раз")
             order = integer(order, "Порядок", 0)
-            if (catalog, order) in seen_orders:
-                raise ImportFailure(f"Повторяется место {order} в коллекции {catalog}")
-            seen_orders.add((catalog, order))
+            for catalog in catalogs:
+                if (catalog, order) in seen_orders:
+                    raise ImportFailure(f"Повторяется место {order} в коллекции {catalog}")
+                seen_orders.add((catalog, order))
             photos = product_photos(root, folder)
-            products.append(Product(form, photos, variants, catalog, order, publish))
+            products.append(Product(form, photos, variants, catalogs, order, publish))
         except ImportFailure as error:
             problems.append(f"{PRODUCT_SHEET}, строка {row}: {error}")
     if unknown := measurements.keys() - known_slugs:
         problems.append(f"{MEASUREMENT_SHEET}: в товарах отсутствуют slug {', '.join(sorted(unknown))}")
     return products
+
+
+def parse_catalogs(book, root, problems):
+    catalogs = {}
+    for row, (key, name, kind, order, published, description, cover) in rows(book, CATALOG_SHEET, CATALOG_HEADERS):
+        try:
+            key = slug(key, "Slug")
+            if key in catalogs:
+                raise ImportFailure(f"Повторяется slug {key}")
+            if kind not in CATALOG_KINDS:
+                raise ImportFailure("Тип: выберите «Коллекция» или «Подборка»")
+            form = dict(
+                slug=key, name=string(name, "Название", 160), kind=CATALOG_KINDS[kind],
+                displayOrder=integer(order, "Порядок", 0), published=choice(published, "Публикация"),
+                description=string(description, "Описание", 4000, optional=True),
+            )
+            image = photo(root, checked_path(root, cover, "Фото обложки")) if cover else None
+            catalogs[key] = Catalog(form, image)
+        except ImportFailure as error:
+            problems.append(f"{CATALOG_SHEET}, строка {row}: {error}")
+    return catalogs
+
+
+def parse_storefront(book, root, problems):
+    settings = list(rows(book, STOREFRONT_SHEET, STOREFRONT_HEADERS))
+    if len(settings) != 1:
+        problems.append(f"Лист «{STOREFRONT_SHEET}»: заполните одну строку настроек")
+        return None
+    row, (published, title, banner, price_hint, timing_hint, delivery_hint) = settings[0]
+    try:
+        published = choice(published, "Публикация")
+        if published and not banner:
+            raise ImportFailure("Для публикации укажите фото баннера")
+        form = dict(
+            published=published, heroTitle=string(title, "Заголовок", 120, optional=not published) or None,
+            photoOrderPriceHint=string(price_hint, "Цена вышивки по фото", 160, optional=True) or None,
+            photoOrderTimingHint=string(timing_hint, "Срок вышивки по фото", 160, optional=True) or None,
+            deliveryPriceHint=string(delivery_hint, "Доставка из коллекции", 160, optional=True) or None,
+        )
+        image = photo(root, checked_path(root, banner, "Фото баннера")) if banner else None
+        return Storefront(form, image)
+    except ImportFailure as error:
+        problems.append(f"{STOREFRONT_SHEET}, строка {row}: {error}")
+        return None
 
 
 def parse_gallery(book, root, problems):
@@ -348,7 +432,7 @@ def parse_gallery(book, root, problems):
         except ImportFailure as error:
             problems.append(f"{GALLERY_SHEET}, строка {row}: {error}")
     if len(examples) > 24:
-        problems.append("Галерея: Shop принимает до 24 примеров вместе с существующими")
+        problems.append("Галерея: допустимо до 24 выбранных примеров")
     return examples
 
 
@@ -357,18 +441,20 @@ def read_inputs(args):
     if not root.is_dir():
         raise ImportFailure(f"Укажите распакованную папку photos: {root}")
     problems = []
-    products, examples = [], []
-    book = load_workbook(args.workbook, read_only=True)
-    try:
-        if args.operation != "gallery":
-            products = parse_products(book, root, problems, args.operation)
-        if args.operation in ("check", "gallery"):
-            examples = parse_gallery(book, root, problems)
-    finally:
-        book.close()
+    with closing(load_workbook(args.workbook, read_only=True)) as book:
+        products = parse_products(book, root, problems)
+        catalogs = parse_catalogs(book, root, problems)
+        storefront = parse_storefront(book, root, problems)
+        gallery = parse_gallery(book, root, problems)
+    for product in products:
+        for key in product.catalogs:
+            if key not in catalogs:
+                problems.append(f"{product.slug}: коллекция {key} отсутствует на листе «{CATALOG_SHEET}»")
     if problems:
         raise ImportFailure("\n".join(problems))
-    return products, examples
+    if storefront is None:
+        raise ImportFailure("В пакете отсутствуют настройки витрины")
+    return ImportPackage(products, catalogs, storefront, gallery)
 
 
 def origin(value):
@@ -397,7 +483,7 @@ class Shop:
         cookies = urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
         self.opener = urllib.request.build_opener(NoRedirect(), cookies)
 
-    def call(self, route, method="GET", value=None, *, expected=200, data=None, content_type=None):
+    def call(self, route, method="GET", value=None, *, expected=200, data=None, content_type=None, image=False):
         headers = {"Accept": "application/json"}
         if method != "GET":
             headers.update(self.csrf)
@@ -411,12 +497,15 @@ class Shop:
             with self.opener.open(request, timeout=30) as response:
                 if response.status != expected:
                     raise ImportFailure(f"{method} {route}: неожиданный HTTP {response.status}")
-                payload = response.read()
                 if expected in (202, 204):
+                    return None
+                if image:
+                    if response.headers.get_content_type() not in IMAGE_FORMATS.values():
+                        raise ImportFailure(f"{method} {route}: ожидалось изображение")
                     return None
                 if response.headers.get_content_type() != "application/json":
                     raise ImportFailure(f"{method} {route}: сервер вернул ответ другого формата")
-                return json.loads(payload)
+                return json.load(response)
         except urllib.error.HTTPError as error:
             with error:
                 try:
@@ -428,7 +517,7 @@ class Shop:
                 detail = detail or "Проверьте учётную запись и одноразовые коды. Для продолжения запустите команду снова"
             if 300 <= error.code < 400:
                 detail = "Укажите конечный адрес API без перенаправлений"
-            raise ImportFailure(f"{method} {route}: HTTP {error.code}. {detail}".rstrip()) from None
+            raise ShopHttpError(method, route, error.code, detail) from None
         except (OSError, http.client.HTTPException) as error:
             raise ImportFailure(f"{method} {route}: ошибка соединения ({error}). Проверьте адрес и сеть, затем повторите запуск") from None
         except ValueError as error:
@@ -463,6 +552,15 @@ class Shop:
             if not result["hasMore"]:
                 return
             page += 1
+
+    def image_exists(self, image_id):
+        try:
+            self.call(f"{IMAGES}/{image_id}", image=True)
+        except ShopHttpError as error:
+            if error.status == 404:
+                return False
+            raise
+        return True
 
     def upload(self, item):
         data = item.path.read_bytes()
@@ -526,153 +624,173 @@ def product_body(current):
     return body
 
 
-def matches_create(api_product, product, journal):
-    image_ids = [journal.images.get(item.digest) for item in product.photos]
-    current = product_body(api_product)
-    return None not in image_ids and current == product.with_images(image_ids)
-
-
-def verify_owned(api, journal, product, current):
-    saved_id = journal.products.get(product.slug)
-    if not current:
-        if saved_id:
-            raise ImportFailure(f"{product.slug}: карточка из журнала отсутствует на сервере")
-        return None
-    if saved_id == current["id"]:
-        return current
-    if not saved_id:
-        detail = api.call(f"{PRODUCTS}/{current['id']}")
-        if matches_create(detail, product, journal):
-            journal.products[product.slug] = detail["id"]
-            journal.save()
-            return current
-    raise ImportFailure(f"{product.slug}: slug уже занят другой карточкой. Проверьте товар и журнал")
-
-
-def same_slot(variant):
-    return variant["size"].lower(), variant["color"].lower()
-
-
-def apply_variants(api, route, current, wanted):
-    slots = {same_slot(item): item for item in current}
-    for variant in wanted:
-        saved = slots.get(same_slot(variant))
-        if saved is None:
-            api.call(route, "POST", variant, expected=201)
-        elif any(saved[key] != value for key, value in variant.items()):
-            if saved["sku"] != variant["sku"]:
-                raise ImportFailure(f"{variant['size']} / {variant['color']}: уже есть вариант с другим SKU")
-            api.call(f"{route}/{saved['id']}", "PUT", variant)
-
-
-def import_products(api, journal, products, listings, catalogs, memberships):
-    work = []
-    for product in products:
-        existing = verify_owned(api, journal, product, listings.get(product.slug))
-        if existing and existing["published"]:
-            print(f"Пропущен опубликованный товар {product.slug}", flush=True)
-            continue
-        work.append((product, existing, catalogs[product.catalog]["id"]))
-
-    planned_orders = {(catalog_id, product.slug): product.order for product, _, catalog_id in work}
-    for product, _, catalog_id in work:
-        for member in memberships[catalog_id].values():
-            if member["slug"] == product.slug or member["displayOrder"] != product.order:
-                continue
-            if planned_orders.get((catalog_id, member["slug"]), member["displayOrder"]) == product.order:
-                raise ImportFailure(f"{product.slug}: порядок {product.order} в {product.catalog} занят товаром {member['slug']}")
-
-    for product, existing, catalog_id in work:
-        try:
-            print(f"Импорт {product.slug}", flush=True)
-            form = product.with_images([journal.image_id(api, item) for item in product.photos])
-            if existing is None:
-                current = api.call(PRODUCTS, "POST", form, expected=201)
-                journal.products[product.slug] = current["id"]
-                journal.save()
-            else:
-                route = f"{PRODUCTS}/{existing['id']}"
-                current = api.call(route)
-                if current["published"]:
-                    raise ImportFailure("Карточку опубликовали во время импорта")
-                if not form["measurements"]:
-                    form["measurements"] = current["measurements"]
-                if product_body(current) != form:
-                    current = api.call(route, "PUT", form)
-            product_id = current["id"]
-            apply_variants(api, f"{PRODUCTS}/{product_id}/variants", current["variants"], product.variants)
-            placement = memberships[catalog_id].get(product.slug)
-            if placement is None or placement["displayOrder"] != product.order:
-                api.call(f"{CATALOGS}/{catalog_id}/products/{product_id}", "PUT",
-                         {"displayOrder": product.order}, expected=204)
-            print(f"  Черновик {api.base}/admin/products/{product_id}", flush=True)
-        except ImportFailure as error:
-            raise ImportFailure(f"{product.slug}: {error}") from error
+def catalog_body(current):
+    body = {key: current[key] for key in ("slug", "name", "kind", "displayOrder", "published", "description")}
+    body["coverImageId"] = current["cover"]["id"] if current["cover"] else None
+    return body
 
 
 def catalog_products(api, catalog):
     return {item["slug"]: item for item in api.pages(f"{CATALOGS}/{catalog['id']}", "products")}
 
 
-def update_product_photos(api, journal, products, catalogs):
-    work = []
-    memberships = {key: catalog_products(api, catalogs[key]) for key in sorted({item.catalog for item in products})}
+def check_product_ids(journal, existing):
+    for key, saved_id in journal.products.items():
+        current = existing.get(key)
+        if current and current["id"] != saved_id:
+            raise ImportFailure(f"{key}: на сервере другой ID товара. Проверьте журнал импорта")
+
+
+def check_placements(products, memberships, removed):
+    managed = {item.slug for item in products} | removed
+    occupied = {(key, item["displayOrder"]): item["slug"] for key, members in memberships.items()
+                for item in members.values() if item["slug"] not in managed and item["published"]}
     for product in products:
-        placement = memberships[product.catalog].get(product.slug)
-        product_id = journal.products.get(product.slug)
-        if not product_id or not placement or placement["id"] != product_id:
-            raise ImportFailure(f"{product.slug}: в коллекции нет карточки из журнала импорта")
-        route = f"{PRODUCTS}/{product_id}"
-        current = product_body(api.call(route))
-        known_ids = [journal.images.get(item.digest) for item in product.photos]
-        current_ids = [item["id"] for item in current["images"]]
-        if not set(current_ids) <= set(known_ids):
-            raise ImportFailure(f"{product.slug}: в карточке есть фото, отсутствующие в пакете и журнале")
-        work.append((product, route, current))
-
-    for product, route, current in work:
-        wanted = product.with_images([journal.image_id(api, item) for item in product.photos])["images"]
-        if current["images"] != wanted:
-            if product_body(api.call(route)) != current:
-                raise ImportFailure(f"{product.slug}: карточка изменилась во время проверки")
-            expected = dict(current, images=wanted)
-            if product_body(api.call(route, "PUT", expected)) != expected:
-                raise ImportFailure(f"{product.slug}: сервер сохранил другой порядок фотографий")
-        if current["published"] and catalogs[product.catalog]["published"]:
-            saved = api.call(f"/api/catalogs/{product.catalog}/products/{product.slug}")
-            if product_body(saved)["images"] != wanted:
-                raise ImportFailure(f"{product.slug}: порядок фото на витрине отличается от пакета")
-        print(f"Фото сверены: {product.slug}, {len(wanted)} шт.", flush=True)
+        for key in product.catalogs:
+            if other := occupied.get((key, product.order)):
+                raise ImportFailure(f"{product.slug}: порядок {product.order} в коллекции {key} занят товаром {other}")
 
 
-def publish_products(api, journal, products, catalogs):
-    memberships = {key: catalog_products(api, catalogs[key]) for key in sorted({item.catalog for item in products})}
-    work = []
-    for product in products:
-        product_id = journal.products.get(product.slug)
-        placement = memberships[product.catalog].get(product.slug)
-        if not product_id or not placement or placement["id"] != product_id:
-            raise ImportFailure(f"{product.slug}: в коллекции нет карточки из журнала импорта")
-        if placement["displayOrder"] != product.order:
-            raise ImportFailure(f"{product.slug}: порядок на сервере отличается. Повторите import")
-        route = f"{PRODUCTS}/{product_id}"
-        detail = api.call(route)
-        saved = product_body(detail)
-        expected = product.with_images([journal.images.get(item.digest) for item in product.photos])
-        expected["published"] = saved["published"]
-        if not expected["measurements"]:
-            expected["measurements"] = saved["measurements"]
-        variants = [{key: value for key, value in row.items() if key != "id"} for row in detail["variants"]]
-        if saved != expected or sorted(variants, key=lambda row: row["sku"]) != sorted(product.variants, key=lambda row: row["sku"]):
-            raise ImportFailure(f"{product.slug}: карточка или варианты отличаются от таблицы. Сверьте данные в админке")
-        work.append((product, route, detail))
-    for product, route, detail in work:
-        if not detail["published"]:
-            if api.call(route) != detail:
-                raise ImportFailure(f"{product.slug}: карточка изменилась во время проверки")
-            api.call(route, "PUT", dict(product_body(detail), published=True))
-        api.call(f"/api/catalogs/{product.catalog}/products/{product.slug}")
-        print(f"Товар {product.slug} доступен на {api.base}/catalog/{product.catalog}", flush=True)
+def prepare_images(api, journal, package):
+    photos = [item for product in package.products for item in product.photos]
+    photos.extend(catalog.cover for catalog in package.catalogs.values() if catalog.cover)
+    if package.storefront.banner:
+        photos.append(package.storefront.banner)
+    for example in package.gallery:
+        photos.append(example.embroidery)
+        if example.source:
+            photos.append(example.source)
+    unique_photos = {item.digest: item for item in photos}
+
+    # Check cached IDs before writing products. Missing photos can be uploaded again.
+    for item in unique_photos.values():
+        cached_id = journal.images.get(item.digest)
+        if cached_id and not api.image_exists(cached_id):
+            del journal.images[item.digest]
+        journal.image_id(api, item)
+
+
+def upsert_catalogs(api, journal, catalogs, existing):
+    resolved = {}
+    for key, catalog in catalogs.items():
+        form = dict(catalog.form, coverImageId=journal.images[catalog.cover.digest] if catalog.cover else None)
+        if key not in existing:
+            saved = api.call(CATALOGS, "POST", form, expected=201)
+        elif catalog_body(existing[key]) != form:
+            saved = api.call(f"{CATALOGS}/{existing[key]['id']}", "PUT", form)
+        else:
+            saved = existing[key]
+        if catalog_body(saved) != form:
+            raise ImportFailure(f"{key}: сервер сохранил другие настройки коллекции")
+        resolved[key] = saved
+    return resolved
+
+
+def variant_data(items):
+    return {item["sku"]: {key: value for key, value in item.items() if key != "id"} for item in items}
+
+
+def variant_slot(item):
+    return item["size"].lower(), item["color"].lower()
+
+
+def plan_variants(current, wanted):
+    current_by_sku = {item["sku"]: item for item in current}
+    current_by_slot = {variant_slot(item): item for item in current}
+    planned = []
+    taken = set()
+    for variant in wanted:
+        saved = current_by_sku.get(variant["sku"])
+        by_slot = current_by_slot.get(variant_slot(variant))
+        # Keep an existing ID when a size/color match receives a different SKU.
+        if saved is None:
+            saved = by_slot
+        if saved and (saved["id"] in taken or (by_slot and by_slot["id"] != saved["id"])):
+            raise ImportFailure(f"{variant['sku']}: SKU и размер с цветом относятся к разным вариантам")
+        planned.append((variant, saved))
+        if saved:
+            taken.add(saved["id"])
+    return planned, [item for item in current if item["id"] not in taken]
+
+
+def sync_variants(api, route, plan):
+    planned, removed = plan
+    for variant, saved in planned:
+        if not saved:
+            api.call(route, "POST", variant, expected=201)
+        elif any(saved[key] != value for key, value in variant.items()):
+            api.call(f"{route}/{saved['id']}", "PUT", variant)
+    for item in removed:
+        api.call(f"{route}/{item['id']}", "DELETE", expected=204)
+
+
+def update_product(api, journal, product, current, variant_plan, catalogs, memberships):
+    form = product.with_images([journal.images[item.digest] for item in product.photos])
+    if current is None:
+        current = api.call(PRODUCTS, "POST", form, expected=201)
+    product_id = current["id"]
+    if journal.products.get(product.slug) != product_id:
+        journal.products[product.slug] = product_id
+        journal.save()
+    route = f"{PRODUCTS}/{product_id}"
+    desired = dict(form, published=product.publish)
+    # On an already visible card, keep it published during changes to its content.
+    update = dict(form, published=current["published"] and product.publish)
+    if product_body(current) != update:
+        current = api.call(route, "PUT", update)
+    sync_variants(api, f"{route}/variants", variant_plan)
+    for key, catalog in catalogs.items():
+        placement = memberships[key].get(product.slug)
+        placement_route = f"{CATALOGS}/{catalog['id']}/products/{product_id}"
+        if key in product.catalogs:
+            if placement is None or placement["displayOrder"] != product.order:
+                api.call(placement_route, "PUT", {"displayOrder": product.order}, expected=204)
+        elif placement is not None:
+            api.call(placement_route, "DELETE", expected=204)
+
+    saved = api.call(route)
+    if saved["published"] != product.publish:
+        saved = api.call(route, "PUT", desired)
+    if product_body(saved) != desired or variant_data(saved["variants"]) != variant_data(product.variants):
+        raise ImportFailure("карточка или варианты после сохранения отличаются от таблицы")
+
+
+def verify_catalogs(api, journal, products, catalogs, removed):
+    for key, catalog in catalogs.items():
+        actual = catalog_products(api, catalog)
+        for product in products:
+            placement = actual.get(product.slug)
+            if key in product.catalogs:
+                if not placement or placement["id"] != journal.products[product.slug] or placement["displayOrder"] != product.order:
+                    raise ImportFailure(f"{product.slug}: размещение в коллекции {key} отличается от таблицы")
+            elif placement:
+                raise ImportFailure(f"{product.slug}: лишняя привязка к коллекции {key}")
+        if retired := removed & actual.keys():
+            raise ImportFailure(f"{key}: сохранены привязки снятых с публикации товаров {', '.join(sorted(retired))}")
+        if catalog["published"]:
+            summary = {item["slug"]: item for item in api.pages(f"/api/catalogs/{key}", "products")}
+            for product in products:
+                should_show = product.publish and key in product.catalogs
+                if (product.slug in summary) != should_show:
+                    raise ImportFailure(f"{product.slug}: неверная видимость в коллекции {key}")
+                if should_show and summary[product.slug]["displayOrder"] != product.order:
+                    raise ImportFailure(f"{product.slug}: неверный порядок на витрине в коллекции {key}")
+
+
+def retire_products(api, journal, removed, existing, catalogs, memberships):
+    for key in sorted(removed):
+        if key in existing:
+            route = f"{PRODUCTS}/{existing[key]['id']}"
+            current = product_body(api.call(route))
+            if current["published"]:
+                api.call(route, "PUT", dict(current, published=False))
+                print(f"Снят с публикации {key}", flush=True)
+            for catalog_key, catalog in catalogs.items():
+                if key in memberships[catalog_key]:
+                    api.call(f"{CATALOGS}/{catalog['id']}/products/{existing[key]['id']}", "DELETE", expected=204)
+        else:
+            del journal.products[key]
+            journal.save()
 
 
 def storefront_form(current):
@@ -687,38 +805,62 @@ def storefront_form(current):
     return form
 
 
-def gallery_additions(form, examples, lookup):
-    existing = {item["embroideryImageId"]: item for item in form["gallery"]}
-    additions = []
-    for example in examples:
-        item = dict(embroideryImageId=lookup(example.embroidery),
-                    sourceImageId=lookup(example.source) if example.source else None, caption=example.caption)
-        saved = existing.get(item["embroideryImageId"])
-        if not saved:
-            additions.append(item)
-        elif item != saved:
-            raise ImportFailure(f"Пример {example.embroidery.relative} уже есть в галерее с другими данными")
-    return additions
+def update_storefront(api, journal, storefront, gallery, current):
+    before = storefront_form(current)
+    form = dict(storefront.form, version=before["version"])
+    form["heroImageId"] = journal.images[storefront.banner.digest] if storefront.banner else None
+    form["gallery"] = [
+        dict(embroideryImageId=journal.images[item.embroidery.digest],
+             sourceImageId=journal.images[item.source.digest] if item.source else None, caption=item.caption)
+        for item in gallery
+    ]
+    if form != before:
+        saved = storefront_form(api.call(STOREFRONT, "PUT", form))
+        form["version"] = saved["version"]
+        if saved != form:
+            raise ImportFailure("Сервер сохранил другие настройки витрины")
+    if form["published"] and storefront_form(api.call("/api/storefront")) != form:
+        raise ImportFailure("Данные на главной отличаются от таблицы")
 
 
-def import_gallery(api, journal, examples):
-    form = storefront_form(api.call(STOREFRONT))
-    planned = gallery_additions(form, examples, lambda item: journal.images.get(item.digest, item.digest))
-    if len(form["gallery"]) + len(planned) > 24:
-        raise ImportFailure("Вместе с текущими примерами получится больше 24 работ. Уменьшите список в таблице")
-    if planned:
-        for example in examples:
-            journal.image_id(api, example.embroidery)
-            if example.source:
-                journal.image_id(api, example.source)
-        form["gallery"].extend(gallery_additions(form, examples, lambda item: journal.images[item.digest]))
-        api.call(STOREFRONT, "PUT", form)
-    print(f"Добавлено примеров: {len(planned)}. Всего в галерее: {len(form['gallery'])}", flush=True)
+def import_package(api, journal, package):
+    existing = {item["slug"]: item for item in api.pages(PRODUCTS)}
+    existing_catalogs = {item["slug"]: item for item in api.pages(CATALOGS)}
+    memberships = {key: catalog_products(api, existing_catalogs[key]) if key in existing_catalogs else {}
+                   for key in package.catalogs}
+    current_storefront = api.call(STOREFRONT)
+    removed = journal.products.keys() - {item.slug for item in package.products}
+    check_product_ids(journal, existing)
+    check_placements(package.products, memberships, removed)
+
+    work = []
+    for product in package.products:
+        present = existing.get(product.slug)
+        detail = api.call(f"{PRODUCTS}/{present['id']}") if present else None
+        try:
+            variant_plan = plan_variants(detail["variants"] if detail else [], product.variants)
+        except ImportFailure as error:
+            raise ImportFailure(f"{product.slug}: {error}") from error
+        work.append((product, detail, variant_plan))
+
+    prepare_images(api, journal, package)
+
+    catalogs = upsert_catalogs(api, journal, package.catalogs, existing_catalogs)
+    retire_products(api, journal, removed, existing, catalogs, memberships)
+    for product, detail, variant_plan in work:
+        try:
+            update_product(api, journal, product, detail, variant_plan, catalogs, memberships)
+        except ImportFailure as error:
+            raise ImportFailure(f"{product.slug}: {error}") from error
+
+    verify_catalogs(api, journal, package.products, catalogs, removed)
+    update_storefront(api, journal, package.storefront, package.gallery, current_storefront)
+    print(f"Сверено: товаров {len(package.products)}, коллекций {len(catalogs)}, примеров галереи {len(package.gallery)}", flush=True)
 
 
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("check", "import", "publish", "photos", "gallery"))
+    parser.add_argument("operation", choices=("check", "import"))
     parser.add_argument("--workbook", type=Path, required=True, help="путь к заполненному XLSX")
     parser.add_argument("--photos", type=Path, required=True, help="путь к папке photos распакованного пакета")
     parser.add_argument("--url", help="HTTPS-адрес Shop")
@@ -728,18 +870,14 @@ def arguments():
 
 
 def run(args):
-    products, examples = read_inputs(args)
-    to_publish = [item for item in products if item.publish]
+    package = read_inputs(args)
     if args.operation == "check":
-        print(f"Проверено: карточек {len(products)}, к публикации {len(to_publish)}, "
-              f"{sum(len(item.photos) for item in products)} фото, "
-              f"{sum(len(item.variants) for item in products)} вариантов, {len(examples)} примеров галереи")
-        for item in products:
-            if not item.variants:
-                print(f"  {item.slug}: можно создать черновик без вариантов")
+        products = package.products
+        print(f"Проверено: товаров {len(products)}, к публикации {sum(p.publish for p in products)}, "
+              f"{sum(len(p.photos) for p in products)} фото в карточках, "
+              f"{sum(len(p.variants) for p in products)} вариантов, "
+              f"{len(package.catalogs)} коллекций, {len(package.gallery)} примеров галереи")
         return
-    if not (products or examples):
-        raise ImportFailure("В таблице нет строк, отмеченных для этой команды")
     if not args.url or not args.state:
         raise ImportFailure("Для записи укажите адрес --url и журнал --state")
     base = origin(args.url)
@@ -749,25 +887,7 @@ def run(args):
     with locked_journal(args.state, base) as journal:
         api = Shop(base)
         api.login(args.email)
-        if args.operation == "gallery":
-            import_gallery(api, journal, examples)
-            return
-        catalogs = {item["slug"]: item for item in api.pages(CATALOGS)}
-        targets = {item.catalog for item in products}
-        if missing := targets - catalogs.keys():
-            raise ImportFailure(f"Коллекции отсутствуют на сервере: {', '.join(sorted(missing))}")
-        if args.operation == "photos":
-            update_product_photos(api, journal, products, catalogs)
-            return
-        unpublished = {item.catalog for item in to_publish if not catalogs[item.catalog]["published"]}
-        if unpublished:
-            raise ImportFailure(f"Сначала опубликуйте коллекции: {', '.join(sorted(unpublished))}")
-        if args.operation == "import":
-            memberships = {catalogs[key]["id"]: catalog_products(api, catalogs[key]) for key in sorted(targets)}
-            listings = {item["slug"]: item for item in api.pages(PRODUCTS)}
-            import_products(api, journal, products, listings, catalogs, memberships)
-        if to_publish:
-            publish_products(api, journal, to_publish, catalogs)
+        import_package(api, journal, package)
 
 
 def main():
