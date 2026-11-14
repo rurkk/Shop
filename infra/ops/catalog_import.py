@@ -36,12 +36,14 @@ STOREFRONT = "/api/staff/storefront"
 PRODUCT_SHEET = "Товары"
 GROUP_SHEET = "Группы вариантов"
 GALLERY_SHEET = "Галерея"
+MEASUREMENT_SHEET = "Замеры"
 PRODUCT_HEADERS = (
     "Название", "Импорт", "Публикация", "Группа вариантов", "Тип изделия", "Дизайн", "Папка фото",
     "Slug", "Описание для покупателя", "Порядок", "Коллекция", "Заметка по фото", "Источник Instagram",
 )
 GROUP_HEADERS = ("Код группы", "Цвет", "Размеры", "Цена, ₽", "Наличие", "Срок, дней")
 GALLERY_HEADERS = ("Добавить", "Подпись", "Фото вышивки", "Исходник")
+MEASUREMENT_HEADERS = ("Slug товара", "Размер", "Ширина, см", "Длина, см", "Рукав, см")
 SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 PHOTO_NAME = re.compile(r"(\d{2})-[a-z0-9-]+\.(?:jpe?g|png)")
 SKU_LIMIT = 64
@@ -124,6 +126,12 @@ def price_kopecks(value):
     raise ImportFailure("Цена, ₽: укажите положительное число с точностью до копейки")
 
 
+def centimeters(value, label):
+    if type(value) in (int, float) and 0.1 <= value <= 999.9 and round(value, 1) == value:
+        return value
+    raise ImportFailure(f"{label}: укажите от 0,1 до 999,9 см с точностью до 0,1 см")
+
+
 def slug(value, label):
     value = string(value, label, 80)
     if not SLUG.fullmatch(value):
@@ -186,6 +194,8 @@ def product_photos(root, folder):
 
 
 def rows(book, sheet_name, headers):
+    if sheet_name not in book.sheetnames:
+        raise ImportFailure(f"В таблице отсутствует лист «{sheet_name}»")
     sheet = book[sheet_name]
     header = next(sheet.iter_rows(min_row=5, max_row=5, max_col=len(headers), values_only=True), ())
     if header != headers:
@@ -237,12 +247,34 @@ def variant_payload(product_slug, variant):
     return dict(variant, sku=f"{product_slug[:SKU_LIMIT - 13].upper()}-{suffix}")
 
 
+def product_measurements(book, problems):
+    measurements = {}
+    for row, (key, size, width, length, sleeve) in rows(book, MEASUREMENT_SHEET, MEASUREMENT_HEADERS):
+        try:
+            key = slug(key, "Slug товара")
+            size = string(size, "Размер", 32)
+            sizes = measurements.setdefault(key, {})
+            if size.lower() in sizes:
+                raise ImportFailure(f"Для {key} уже указаны замеры размера {size}")
+            if len(sizes) >= 32:
+                raise ImportFailure(f"Для {key} допустимо до 32 строк замеров")
+            sizes[size.lower()] = dict(
+                size=size, widthCm=centimeters(width, "Ширина"), lengthCm=centimeters(length, "Длина"),
+                sleeveLengthCm=centimeters(sleeve, "Рукав") if sleeve is not None else None,
+            )
+        except ImportFailure as error:
+            problems.append(f"{MEASUREMENT_SHEET}, строка {row}: {error}")
+    return measurements
+
+
 def parse_products(book, root, problems, operation):
     groups = variant_groups(book, problems)
+    measurements = product_measurements(book, problems)
     products = []
     seen_slugs = set()
     seen_orders = set()
     seen_skus = set()
+    known_slugs = set()
     for row, values in rows(book, PRODUCT_SHEET, PRODUCT_HEADERS):
         name, include, publish, group, garment, design, folder, key, description, order, catalog, *_ = values
         try:
@@ -250,6 +282,8 @@ def parse_products(book, root, problems, operation):
             publish = choice(publish, "Публикация")
             if publish and not include:
                 raise ImportFailure("Для публикации включите карточку в импорт")
+            if isinstance(key, str):
+                known_slugs.add(key.strip())
             if not include or (operation == "publish" and not publish):
                 continue
             key = slug(key, "Slug")
@@ -258,14 +292,15 @@ def parse_products(book, root, problems, operation):
             seen_slugs.add(key)
             form = dict(
                 slug=key, name=string(name, "Название", 160), garmentType=string(garment, "Тип изделия", 80),
-                design=string(design, "Дизайн", 160), description=string(description, "Описание", 4000, optional=True),
-                measurements=[], published=False,
+                design=string(design, "Дизайн", 160),
+                description=string(description, "Описание", 4000, optional=not publish),
+                measurements=list(measurements.get(key, {}).values()), published=False,
             )
             group = string(group, "Группа вариантов", 80, optional=True)
             if group and group not in groups:
                 raise ImportFailure(f"Группа «{group}» отсутствует на листе «{GROUP_SHEET}»")
             variants = [variant_payload(key, variant) for variant in groups.get(group, [])]
-            if operation != "import" and publish and not variants:
+            if publish and not variants:
                 raise ImportFailure("Для публикации укажите хотя бы один вариант")
             skus = {variant["sku"] for variant in variants}
             if len(skus) != len(variants) or skus & seen_skus:
@@ -280,6 +315,8 @@ def parse_products(book, root, problems, operation):
             products.append(Product(form, photos, variants, catalog, order, publish))
         except ImportFailure as error:
             problems.append(f"{PRODUCT_SHEET}, строка {row}: {error}")
+    if unknown := measurements.keys() - known_slugs:
+        problems.append(f"{MEASUREMENT_SHEET}: в товарах отсутствуют slug {', '.join(sorted(unknown))}")
     return products
 
 
@@ -547,7 +584,8 @@ def import_products(api, journal, products, listings, catalogs, memberships):
                 current = api.call(route)
                 if current["published"]:
                     raise ImportFailure("Карточку опубликовали во время импорта")
-                form["measurements"] = current["measurements"]
+                if not form["measurements"]:
+                    form["measurements"] = current["measurements"]
                 if product_body(current) != form:
                     current = api.call(route, "PUT", form)
             product_id = current["id"]
@@ -561,23 +599,27 @@ def import_products(api, journal, products, listings, catalogs, memberships):
             raise ImportFailure(f"{product.slug}: {error}") from error
 
 
-def publish_products(api, journal, products, listings, catalogs, memberships):
+def catalog_products(api, catalog):
+    return {item["slug"]: item for item in api.pages(f"{CATALOGS}/{catalog['id']}", "products")}
+
+
+def publish_products(api, journal, products, catalogs):
+    memberships = {key: catalog_products(api, catalogs[key]) for key in sorted({item.catalog for item in products})}
     work = []
     for product in products:
-        catalog = catalogs[product.catalog]
-        if not catalog["published"]:
-            raise ImportFailure(f"Коллекция {product.catalog} ещё не опубликована")
-        current = listings.get(product.slug)
-        placement = memberships[catalog["id"]].get(product.slug)
-        if not current or journal.products.get(product.slug) != current["id"] or not placement:
-            raise ImportFailure(f"{product.slug}: сначала выполните import с этим журналом")
+        product_id = journal.products.get(product.slug)
+        placement = memberships[product.catalog].get(product.slug)
+        if not product_id or not placement or placement["id"] != product_id:
+            raise ImportFailure(f"{product.slug}: в коллекции нет карточки из журнала импорта")
         if placement["displayOrder"] != product.order:
             raise ImportFailure(f"{product.slug}: порядок на сервере отличается. Повторите import")
-        route = f"{PRODUCTS}/{current['id']}"
+        route = f"{PRODUCTS}/{product_id}"
         detail = api.call(route)
         saved = product_body(detail)
         expected = product.with_images([journal.images.get(item.digest) for item in product.photos])
-        expected.update(published=saved["published"], measurements=saved["measurements"])
+        expected["published"] = saved["published"]
+        if not expected["measurements"]:
+            expected["measurements"] = saved["measurements"]
         variants = [{key: value for key, value in row.items() if key != "id"} for row in detail["variants"]]
         if saved != expected or sorted(variants, key=lambda row: row["sku"]) != sorted(product.variants, key=lambda row: row["sku"]):
             raise ImportFailure(f"{product.slug}: карточка или варианты отличаются от таблицы. Сверьте данные в админке")
@@ -645,8 +687,10 @@ def arguments():
 
 def run(args):
     products, examples = read_inputs(args)
+    to_publish = [item for item in products if item.publish]
     if args.operation == "check":
-        print(f"Проверено: {len(products)} черновиков, {sum(len(item.photos) for item in products)} фото, "
+        print(f"Проверено: карточек {len(products)}, к публикации {len(to_publish)}, "
+              f"{sum(len(item.photos) for item in products)} фото, "
               f"{sum(len(item.variants) for item in products)} вариантов, {len(examples)} примеров галереи")
         for item in products:
             if not item.variants:
@@ -670,11 +714,15 @@ def run(args):
         targets = {item.catalog for item in products}
         if missing := targets - catalogs.keys():
             raise ImportFailure(f"Коллекции отсутствуют на сервере: {', '.join(sorted(missing))}")
-        memberships = {catalogs[key]["id"]: {item["slug"]: item for item in api.pages(f"{CATALOGS}/{catalogs[key]['id']}", "products")}
-                       for key in sorted(targets)}
-        listings = {item["slug"]: item for item in api.pages(PRODUCTS)}
-        action = publish_products if args.operation == "publish" else import_products
-        action(api, journal, products, listings, catalogs, memberships)
+        unpublished = {item.catalog for item in to_publish if not catalogs[item.catalog]["published"]}
+        if unpublished:
+            raise ImportFailure(f"Сначала опубликуйте коллекции: {', '.join(sorted(unpublished))}")
+        if args.operation == "import":
+            memberships = {catalogs[key]["id"]: catalog_products(api, catalogs[key]) for key in sorted(targets)}
+            listings = {item["slug"]: item for item in api.pages(PRODUCTS)}
+            import_products(api, journal, products, listings, catalogs, memberships)
+        if to_publish:
+            publish_products(api, journal, to_publish, catalogs)
 
 
 def main():
