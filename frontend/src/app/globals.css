@@ -98,7 +98,6 @@ main { min-height: 55vh; }
 .footer-brand p { margin-top: 8px; color: var(--muted); font-size: .82rem; }
 .footer-layout nav ul { margin-top: 7px; }
 .footer-layout nav a { display: inline-flex; align-items: center; min-height: 40px; max-width: 100%; padding-block: 6px; }
-.footer-documents a { text-decoration: underline; text-decoration-thickness: 1px; }
 
 .hero {
   position: relative; isolation: isolate; overflow: hidden; color: var(--paper); background: #111;

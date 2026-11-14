@@ -34,7 +34,7 @@ export function SiteShell({ children }: { children: ReactNode }) {
             <li><Link href="/admin">Вход для команды</Link></li>
           </ul>
         </nav>
-        <nav className="footer-documents" aria-labelledby="footer-help">
+        <nav aria-labelledby="footer-help">
           <p id="footer-help" className="eyebrow">Помощь</p>
           <ul>
             <li><Link href="/offer#returns">Доставка и возврат</Link></li>
