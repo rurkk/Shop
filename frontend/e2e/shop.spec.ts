@@ -29,7 +29,7 @@ async function mailIds(request: APIRequestContext, email: string, subject = "К�
 function staffTotp(email: string) {
   const accounts = process.env.SHOP_TEST_STAFF_TOTP_ACCOUNTS ?? parseEnv(
     readFileSync(path.resolve(process.cwd(), "../.env.example"), "utf8"),
-  ).SHOP_STAFF_TOTP_ACCOUNTS;
+  ).SHOP_BOOTSTRAP_STAFF_TOTP_ACCOUNTS;
   const secret = accounts?.split(",").find((entry) => entry.startsWith(`${email}=`))?.slice(email.length + 1);
   if (!secret || !/^[A-Z2-7]{32}$/.test(secret)) throw new Error(`Missing test TOTP key for ${email}`);
   const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -399,6 +399,7 @@ test("покупатель и менеджер проводят заказ от 
     await expect(page.getByRole("heading", { name: "Открыть заказ" })).toBeVisible();
     expect((await page.request.get("/api" + new URL(orderURL).pathname)).status()).toBe(401);
 
+    await checkStaffDirectory(staff, mobile ? "mobile" : "desktop");
     if (!mobile) {
       const storefrontNav = staff.getByRole("navigation", { name: "Меню команды" });
       await storefrontNav.getByRole("link", { name: "Витрина" }).click();
@@ -421,6 +422,28 @@ test("покупатель и менеджер проводят заказ от 
     await staff.context().close();
   }
 });
+
+async function checkStaffDirectory(staff: Page, project: string) {
+  await staff.getByRole("link", { name: "Сотрудники", exact: true }).click();
+  const email = `ui-new-${project}-${testRun}@example.test`;
+  await staff.getByRole("textbox", { name: "Рабочий email" }).fill(email);
+  await staff.getByRole("button", { name: "Создать учётную запись" }).click();
+  const key = staff.getByRole("textbox", { name: "Ключ TOTP" });
+  await expect(key).toHaveValue(/^[A-Z2-7]{32}$/);
+  await staff.getByRole("button", { name: "Закрыть ключ" }).click();
+  const account = staff.getByRole("listitem").filter({ hasText: email });
+  await expect(account.getByText("Сотрудник", { exact: true })).toBeVisible();
+  await assertNoOverflow(staff);
+  const revoke = account.getByRole("button", { name: "Отозвать доступ" });
+  await revoke.click();
+  const confirmation = staff.getByRole("dialog", { name: "Отозвать доступ?" });
+  await confirmation.getByRole("button", { name: "Отмена" }).click();
+  await expect(account).toBeVisible();
+  await revoke.click();
+  await confirmation.getByRole("button", { name: "Отозвать", exact: true }).click();
+  await expect(staff.getByRole("status").filter({ hasText: email })).toBeVisible();
+  await expect(account).toHaveCount(0);
+}
 
 async function publishCollection(staff: Page, visitor: Page) {
   const nav = staff.getByRole("navigation", { name: "Меню команды" });

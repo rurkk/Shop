@@ -1,6 +1,7 @@
 package ru.embroidery.shop.auth
 
 import jakarta.servlet.DispatcherType
+import jakarta.servlet.FilterChain
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
 import org.springframework.context.annotation.Bean
@@ -14,6 +15,7 @@ import org.springframework.security.core.authority.SimpleGrantedAuthority
 import org.springframework.security.core.context.SecurityContextHolder
 import org.springframework.security.web.SecurityFilterChain
 import org.springframework.security.web.authentication.logout.HttpStatusReturningLogoutSuccessHandler
+import org.springframework.security.web.context.SecurityContextHolderFilter
 import org.springframework.security.web.context.HttpSessionSecurityContextRepository
 import org.springframework.security.web.csrf.CsrfToken
 import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository
@@ -21,13 +23,20 @@ import org.springframework.security.web.servlet.util.matcher.PathPatternRequestM
 import org.springframework.stereotype.Component
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RestController
+import org.springframework.web.filter.OncePerRequestFilter
 import ru.embroidery.shop.missingOrder
 import java.io.Serializable
 import java.util.UUID
 
 enum class Role { CUSTOMER, STAFF }
 
-data class Actor(val email: String, val role: Role, val orderId: UUID? = null) : Serializable {
+data class Actor(
+    val email: String,
+    val role: Role,
+    val orderId: UUID? = null,
+    val staffCredentialId: UUID? = null,
+    val canManageStaff: Boolean = false
+) : Serializable {
     fun requireOrder(id: UUID) {
         if (role != Role.STAFF && orderId != id) missingOrder()
     }
@@ -53,9 +62,11 @@ class SecurityConfiguration {
     fun security(
         http: HttpSecurity,
         contexts: HttpSessionSecurityContextRepository,
-        tokens: HttpSessionCsrfTokenRepository
+        tokens: HttpSessionCsrfTokenRepository,
+        staffAccounts: StaffAccounts
     ): SecurityFilterChain = http
         .securityContext { it.securityContextRepository(contexts) }
+        .addFilterAfter(StaffSessionFilter(staffAccounts), SecurityContextHolderFilter::class.java)
         .csrf {
             it.csrfTokenRepository(tokens)
                 .ignoringRequestMatchers(PathPatternRequestMatcher.withDefaults().matcher(HttpMethod.POST, "/api/payments/yookassa/webhook"))
@@ -80,11 +91,25 @@ class SecurityConfiguration {
                 "/api/orders/*/access/code", "/api/orders/*/access/verify",
                 "/api/staff/access/code", "/api/staff/access/verify", "/api/payments/yookassa/webhook"
             ).permitAll()
+            it.requestMatchers("/api/staff/accounts", "/api/staff/accounts/**").hasAuthority("MANAGE_STAFF")
             it.requestMatchers("/api/staff/**").hasRole("STAFF")
             it.requestMatchers("/api/orders/**").hasAnyRole("CUSTOMER", "STAFF")
             it.anyRequest().denyAll()
         }
         .build()
+}
+
+private class StaffSessionFilter(private val accounts: StaffAccounts) : OncePerRequestFilter() {
+    override fun doFilterInternal(request: HttpServletRequest, response: HttpServletResponse, chain: FilterChain) {
+        if (request.getSession(false) != null) {
+            val actor = SecurityContextHolder.getContext().authentication?.principal as? Actor
+            if (actor?.role == Role.STAFF && !accounts.sessionIsActive(actor)) {
+                request.getSession(false)?.invalidate()
+                SecurityContextHolder.clearContext()
+            }
+        }
+        chain.doFilter(request, response)
+    }
 }
 
 @Component
@@ -96,9 +121,9 @@ class BrowserSessions(
         request.getSession(true)
         request.changeSessionId()
         tokens.saveToken(null, request, response)
-        val authentication = UsernamePasswordAuthenticationToken.authenticated(
-            actor, null, listOf(SimpleGrantedAuthority("ROLE_${actor.role}"))
-        )
+        val authorities = mutableListOf(SimpleGrantedAuthority("ROLE_${actor.role}"))
+        if (actor.canManageStaff) authorities += SimpleGrantedAuthority("MANAGE_STAFF")
+        val authentication = UsernamePasswordAuthenticationToken.authenticated(actor, null, authorities)
         val context = SecurityContextHolder.createEmptyContext()
         context.authentication = authentication
         SecurityContextHolder.setContext(context)

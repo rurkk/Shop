@@ -20,7 +20,8 @@ fun main(args: Array<String>) {
 
 @ConfigurationProperties("shop")
 class ShopSettings(
-    val staffTotpAccounts: List<String>,
+    val bootstrapStaffTotpAccounts: List<String>,
+    val staffTotpEncryptionKey: String,
     val codeSecret: String,
     val mailFrom: String,
     val publicOrigin: URI,

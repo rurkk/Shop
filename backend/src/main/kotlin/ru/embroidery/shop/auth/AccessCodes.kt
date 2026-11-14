@@ -75,9 +75,10 @@ class AccessCodes(private val db: JdbcClient, private val staffAccounts: StaffAc
     fun consume(scope: String, code: String): Boolean = consume(scope, code) { true }
 
     @Transactional
-    fun consumeStaffCode(email: String, code: String, totp: String): Boolean {
-        val credential = staffAccounts[email] ?: return false
-        return consume(staffScope(email), code) { consumeTotp(email, credential, totp) }
+    fun consumeStaffCode(email: String, code: String, totp: String): Actor? {
+        val login = staffAccounts.login(email) ?: return null
+        if (!consume(staffScope(login.credentialId), code) { consumeTotp(email, login.totp, totp) }) return null
+        return Actor(email, Role.STAFF, staffCredentialId = login.credentialId, canManageStaff = login.canManageStaff)
     }
 
     private fun consume(scope: String, code: String, verifyFactor: () -> Boolean): Boolean {
@@ -129,7 +130,7 @@ data class StaffCodeVerification(
     val totp: JsonNode
 )
 
-private fun staffScope(email: String) = "staff:$email"
+private fun staffScope(credentialId: UUID) = "staff:$credentialId"
 
 private fun sixDigitCode(node: JsonNode): String {
     val code = node.stringValue(null)
@@ -172,12 +173,11 @@ class AccessController(
         val email = normalizedEmail(input.email)
         try {
             staffAccessMailExecutor.execute {
-                if (staffAccounts[email] != null) {
-                    try {
-                        send(staffScope(email), email, Role.STAFF)
-                    } catch (error: RuntimeException) {
-                        logger.error("Unable to issue a staff access code ({})", error.javaClass.simpleName)
-                    }
+                try {
+                    val credentialId = staffAccounts.credentialId(email) ?: return@execute
+                    send(staffScope(credentialId), email, Role.STAFF)
+                } catch (error: RuntimeException) {
+                    logger.error("Unable to issue a staff access code ({})", error.javaClass.simpleName)
                 }
             }
         } catch (_: TaskRejectedException) {
@@ -191,8 +191,8 @@ class AccessController(
         @Valid @RequestBody input: StaffCodeVerification, request: HttpServletRequest, response: HttpServletResponse
     ) {
         val email = normalizedEmail(input.email)
-        if (!codes.consumeStaffCode(email, sixDigitCode(input.code), sixDigitCode(input.totp))) invalidCode()
-        sessions.start(Actor(email, Role.STAFF), request, response)
+        val actor = codes.consumeStaffCode(email, sixDigitCode(input.code), sixDigitCode(input.totp)) ?: invalidCode()
+        sessions.start(actor, request, response)
     }
 
     private fun ownsOrder(orderId: UUID, email: String): Boolean = db.sql("""

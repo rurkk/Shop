@@ -5,10 +5,11 @@ import org.springframework.core.env.StandardEnvironment
 import ru.embroidery.shop.ShopSettings
 import java.net.URI
 import java.time.Instant
+import java.util.UUID
+import javax.crypto.AEADBadTagException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
 private const val RFC_TEST_KEY = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
@@ -44,21 +45,29 @@ class StaffTotpTest {
     fun `rejects local test addresses and keys in production`() {
         assertFailsWith<IllegalArgumentException> { accounts("staff@example.test=$RFC_TEST_KEY", production = true) }
         assertFailsWith<IllegalArgumentException> { accounts("staff@example.com=$LOCAL_TEST_KEY", production = true) }
-        assertNotNull(accounts("Staff@example.test=$LOCAL_TEST_KEY")["staff@example.test"])
+        assertEquals(mapOf("staff@example.test" to LOCAL_TEST_KEY), accounts("Staff@example.test=$LOCAL_TEST_KEY"))
     }
 
-    private fun accounts(vararg entries: String, production: Boolean = false): StaffAccounts {
-        val environment = StandardEnvironment().apply { setActiveProfiles(if (production) "production" else "local") }
+    @Test
+    fun `only decrypts an authenticator key for the credential it was issued to`() {
         val origin = URI.create("https://shop.example.com")
         val settings = ShopSettings(
-            staffTotpAccounts = entries.toList(),
+            bootstrapStaffTotpAccounts = emptyList(),
+            staffTotpEncryptionKey = "5a".repeat(32),
             codeSecret = "example".repeat(5),
             mailFrom = "orders@example.com",
             publicOrigin = origin,
             storage = ShopSettings.Storage(origin, "shop-test", "test-key", "test-secret")
         )
-        return Validation.buildDefaultValidatorFactory().use { factory ->
-            StaffAccounts(settings, environment, factory.validator)
-        }
+        val keys = StaffTotpKeys(settings, StandardEnvironment())
+        val credentialId = UUID.randomUUID()
+        val encrypted = keys.encrypt(credentialId, RFC_TEST_KEY)
+        assertEquals(1L, keys.decrypt(credentialId, encrypted).matchingStep("287082", Instant.ofEpochSecond(59)))
+        assertFailsWith<AEADBadTagException> { keys.decrypt(UUID.randomUUID(), encrypted) }
     }
+
+    private fun accounts(vararg entries: String, production: Boolean = false): Map<String, String> =
+        Validation.buildDefaultValidatorFactory().use { factory ->
+            parseBootstrapStaffAccounts(entries.toList(), production, factory.validator)
+        }
 }

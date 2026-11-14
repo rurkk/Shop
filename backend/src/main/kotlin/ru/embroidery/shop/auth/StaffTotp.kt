@@ -1,60 +1,57 @@
 package ru.embroidery.shop.auth
 
-import jakarta.validation.Validator
-import jakarta.validation.constraints.Email
 import org.springframework.core.env.Environment
 import org.springframework.core.env.Profiles
 import org.springframework.stereotype.Component
 import ru.embroidery.shop.ShopSettings
 import java.nio.ByteBuffer
 import java.security.MessageDigest
+import java.security.SecureRandom
 import java.time.Instant
 import java.util.HexFormat
+import java.util.UUID
+import javax.crypto.Cipher
 import javax.crypto.Mac
+import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 private const val BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 private const val TOTP_STEP_SECONDS = 30
 
 @Component
-class StaffAccounts(settings: ShopSettings, environment: Environment, validator: Validator) {
-    private val credentials = buildMap {
-        val production = environment.acceptsProfiles(Profiles.of("production"))
-        val secrets = mutableSetOf<String>()
-        for (entry in settings.staffTotpAccounts) {
-            val separator = entry.lastIndexOf('=')
-            require(separator > 0) { "Configure SHOP_STAFF_TOTP_ACCOUNTS as email=Base32-secret pairs" }
-            val email = normalizedEmail(entry.substring(0, separator))
-            require(email.length <= 254 && '@' in email && validator.validate(StaffEmail(email)).isEmpty()) {
-                "SHOP_STAFF_TOTP_ACCOUNTS contains an invalid email"
-            }
-            val secret = entry.substring(separator + 1)
-            val credential = StaffTotp(secret)
-            require(!production || (!email.endsWith(".test") &&
-                HexFormat.of().formatHex(credential.fingerprint) !in localTestFingerprints)) {
-                "Local test accounts and secrets are unavailable in production"
-            }
-            require(email !in this && secrets.add(secret)) {
-                "Each staff account must have a unique email and TOTP secret"
-            }
-            put(email, credential)
+class StaffTotpKeys(settings: ShopSettings, environment: Environment) {
+    private val random = SecureRandom()
+    private val key: SecretKeySpec
+
+    init {
+        val configured = settings.staffTotpEncryptionKey
+        require(configured.matches(Regex("[0-9a-fA-F]{64}"))) {
+            "SHOP_STAFF_TOTP_ENCRYPTION_KEY must contain 64 hexadecimal characters"
         }
-        require(isNotEmpty()) { "Configure at least one staff TOTP account" }
+        require(!environment.acceptsProfiles(Profiles.of("demo", "production")) ||
+            !configured.equals("5a".repeat(32), ignoreCase = true)) {
+            "The local TOTP encryption key is unavailable on a server"
+        }
+        key = SecretKeySpec(HexFormat.of().parseHex(configured), "AES")
     }
 
-    internal operator fun get(email: String): StaffTotp? = credentials[email]
+    fun generate(): String = CharArray(32) { BASE32[random.nextInt(BASE32.length)] }.concatToString()
 
-    private class StaffEmail(@field:Email val value: String)
-
-    private companion object {
-        // Reject the public .env.example keys even if they are assigned a different address.
-        val localTestFingerprints = setOf(
-            "c9927a8a8fa2711ee80aa7231c875b06ecfd7af2de351809063541c28b01f393",
-            "aeb7172be4b77998c2bdc11edd759c8815cee7b4574a629c5bc43e1d8e8cfc1f",
-            "e9137f754e01d83c2e01b117a67f97c2bdb95e1f1a5218f0ed2ef39d61014ce1",
-            "9a459d9b61e01010b3f4a8e5b9a1ed0aab36ff3389b5ceb5e931ef0a34e8e863"
-        )
+    fun encrypt(credentialId: UUID, secret: String): ByteArray {
+        val nonce = ByteArray(12).also(random::nextBytes)
+        return nonce + cipher(Cipher.ENCRYPT_MODE, credentialId, nonce).doFinal(secret.toByteArray(Charsets.US_ASCII))
     }
+
+    internal fun decrypt(credentialId: UUID, encrypted: ByteArray): StaffTotp {
+        val cipher = cipher(Cipher.DECRYPT_MODE, credentialId, encrypted.copyOfRange(0, 12))
+        return StaffTotp(cipher.doFinal(encrypted, 12, encrypted.size - 12).toString(Charsets.US_ASCII))
+    }
+
+    private fun cipher(mode: Int, credentialId: UUID, nonce: ByteArray): Cipher =
+        Cipher.getInstance("AES/GCM/NoPadding").apply {
+            init(mode, key, GCMParameterSpec(128, nonce))
+            updateAAD(credentialId.toString().toByteArray(Charsets.US_ASCII))
+        }
 }
 
 internal class StaffTotp(secret: String) {

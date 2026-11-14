@@ -143,7 +143,8 @@ SHOP_SMTP_PORT=587
 | `SHOP_BACKEND_IMAGE`, `SHOP_FRONTEND_IMAGE` | `shop-backend:<тег>` и `shop-frontend:<тег>` из шага сборки |
 | `SHOP_DB_USER`, `SHOP_DB_PASSWORD`, `SHOP_DB_ADMIN_PASSWORD` | Имя `shop` и два разных пароля. PostgreSQL применяет начальные значения при создании пустого тома |
 | `SHOP_S3_BUCKET`, `SHOP_S3_ACCESS_KEY`, `SHOP_S3_SECRET_KEY` | Бакет `order-files` и отдельная случайная пара ключей SeaweedFS |
-| `SHOP_CODE_SECRET`, `SHOP_STAFF_TOTP_ACCOUNTS` | Секрет для кодов входа и [отдельный TOTP для каждого сотрудника](../README.md#вход-сотрудников) |
+| `SHOP_CODE_SECRET`, `SHOP_STAFF_TOTP_ENCRYPTION_KEY` | Секрет для кодов входа и постоянный ключ шифрования TOTP, по отдельному результату `openssl rand -hex 32` |
+| `SHOP_BOOTSTRAP_STAFF_TOTP_ACCOUNTS` | Начальные администраторы для первого запуска. После входа учётные записи настраиваются в [разделе «Сотрудники»](../README.md#вход-сотрудников) |
 | `SHOP_MAIL_FROM`, `SHOP_SMTP_USERNAME`, `SHOP_SMTP_PASSWORD` | Подтверждённый отправитель на `knitsew.ru` и учётные данные SMTP из Postbox |
 
 Для паролей БД, ключей SeaweedFS и `SHOP_CODE_SECRET` можно использовать отдельные вызовы `openssl rand -hex 32`. Используйте `.env.example` как справочник по формату. Его пароли и TOTP предназначены для локальных тестов. Храните `.env.demo`, приватный SSH-ключ, приватный ключ сертификата и пароль из Instructions вне Git. Для SMTP подтвердите домен в Postbox и добавьте выданную запись DKIM в Timeweb. [Настройка Postbox](https://yandex.cloud/ru/docs/postbox/quickstart) · [Учётные данные SMTP](https://yandex.cloud/ru/docs/postbox/operations/send-email#smtp)
@@ -272,3 +273,5 @@ services:
 Перенесите каталог копии по SSH в зашифрованное хранилище вне VPS. Для проверки восстановления подготовьте соответствующий релиз в отдельном Compose-проекте и сначала запустите только PostgreSQL. Загрузите `shop.dump` через `pg_restore` в пустую базу `shop` с созданной ролью приложения. Распакуйте `files.tar.gz` в пустой том SeaweedFS, затем запустите остальные контейнеры и проверьте восстановленный заказ вместе с вложением.
 
 Для обновления соберите и перенесите новую версию, замените теги двух образов в `.env.demo` и повторите `config --quiet`, `up -d --build --wait --wait-timeout 120` и проверку сайта. Постоянные тома сохраняются. Для отката верните Compose-файлы и теги предыдущего релиза. Если успели примениться несовместимые миграции, восстановите базу и файлы из копии, сделанной перед обновлением.
+
+При первом обновлении до версии с разделом «Сотрудники» после резервного копирования и перед запуском нового backend переименуйте `SHOP_STAFF_TOTP_ACCOUNTS` в `SHOP_BOOTSTRAP_STAFF_TOTP_ACCOUNTS` в `.env.demo` и добавьте постоянный `SHOP_STAFF_TOTP_ENCRYPTION_KEY`. При запуске backend перенесёт заданные email и действующие ключи TOTP в PostgreSQL и даст этим учётным записям право управления доступом. После проверки входа уберите временную переменную из `.env.demo` и сохраните ключ шифрования для восстановления из резервной копии.

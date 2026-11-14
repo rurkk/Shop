@@ -17,6 +17,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter
 import ru.embroidery.shop.ApiFailure
 import ru.embroidery.shop.auth.Actor
+import ru.embroidery.shop.auth.StaffAccounts
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -52,6 +53,7 @@ class StreamingConfiguration {
 @Component
 class MessageStreams(
     private val messages: Messages,
+    private val staffAccounts: StaffAccounts,
     @param:Qualifier("chatExecutor") private val executor: Executor
 ) {
     private val subscriptions = ConcurrentHashMap<UUID, Subscription>()
@@ -134,7 +136,8 @@ class MessageStreams(
         val inactivityLimit = session.maxInactiveInterval.toLong() * 1000
         val lastActivity = maxOf(session.lastAccessedTime, subscription.openedAt)
         session.id == subscription.sessionId && context?.authentication?.principal == subscription.actor &&
-            (inactivityLimit <= 0 || System.currentTimeMillis() - lastActivity < inactivityLimit)
+            (inactivityLimit <= 0 || System.currentTimeMillis() - lastActivity < inactivityLimit) &&
+            staffAccounts.sessionIsActive(subscription.actor)
     } catch (_: IllegalStateException) {
         false
     }

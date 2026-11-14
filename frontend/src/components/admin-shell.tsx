@@ -17,7 +17,7 @@ const links = [
 ];
 
 export function AdminShell({ children }: { children: ReactNode }) {
-  const session = useResource("/api/staff/orders?size=1");
+  const session = useResource<{ canManageStaff: boolean }>("/api/staff/session");
   const pathname = usePathname();
   const task = useTask();
   const needsAccess = session.error instanceof ApiError && [401, 403].includes(session.error.status);
@@ -33,7 +33,9 @@ export function AdminShell({ children }: { children: ReactNode }) {
     <div className="admin-bar">
       <nav aria-label="Меню команды">{links.map(([path, title]) =>
         <Link key={path} href={path} aria-current={pathname === path || (path === "/admin" && pathname.startsWith("/admin/orders/")) ? "page" : undefined}>{title}</Link>
-      )}</nav>
+      )}{session.value.canManageStaff &&
+        <Link href="/admin/staff" aria-current={pathname === "/admin/staff" ? "page" : undefined}>Сотрудники</Link>
+      }</nav>
       <button type="button" className="text-link" disabled={task.busy} onClick={() => void task.run(async () => {
         await write("/api/session/logout", "POST");
         session.reload();

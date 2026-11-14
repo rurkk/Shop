@@ -142,7 +142,7 @@ def staff_totp_secret(email):
     if configured is None:
         example = Path(__file__).resolve().parents[2] / ".env.example"
         configured = next(line.split("=", 1)[1] for line in example.read_text().splitlines()
-                          if line.startswith("SHOP_STAFF_TOTP_ACCOUNTS="))
+                          if line.startswith("SHOP_BOOTSTRAP_STAFF_TOTP_ACCOUNTS="))
     accounts = dict(entry.split("=", 1) for entry in configured.split(","))
     return base64.b32decode(accounts[email])
 
@@ -176,8 +176,9 @@ def verify_staff_factors(browser, credentials):
         browser.opener, browser.cookies = another.opener, another.cookies
 
 
-def log_in_staff(browser, email, check_controls=False):
-    secret = staff_totp_secret(email)
+def log_in_staff(browser, email, check_controls=False, secret=None):
+    if secret is None:
+        secret = staff_totp_secret(email)
     browser.call("/api/staff/orders", expected=401)
     code = request_code(browser, STAFF_ACCESS, email)
     previous_session = browser.session_id()
@@ -204,6 +205,58 @@ def log_in_staff(browser, email, check_controls=False):
         browser.call(verify, "POST", credentials, expected=204)
         assert browser.session_id() != previous_session, "Staff login must rotate the session ID"
     browser.renew_csrf()
+
+
+def check_staff_accounts(admin, buyer, order, run):
+    accounts = "/api/staff/accounts"
+    session = "/api/staff/session"
+    assert admin.call(session) == {"email": STAFF.lower(), "canManageStaff": True}
+    Browser().call(accounts, expected=401)
+    buyer.call(accounts, expected=403)
+    admin.call(accounts, "POST", {"email": "invalid"}, expected=403, csrf=False)
+    directory = admin.call(accounts)
+    own = next(item for item in directory["items"] if item["email"] == directory["currentEmail"])
+    assert own["canManageStaff"]
+    own_path = f"{accounts}/{own['id']}"
+    admin.call(own_path, "DELETE", expected=409)
+    admin.call(own_path + "/reset-totp", "POST", expected=409)
+
+    email = f"team-{run}@example.test"
+    created = admin.call(accounts, "POST", {"email": email}, expected=201)
+    account = created["account"]
+    assert account["email"] == email and account["canManageStaff"] is False
+    assert len(base64.b32decode(created["totpSecret"])) == 20
+    path = f"{accounts}/{account['id']}"
+    try:
+        admin.call(accounts, "POST", {"email": email.upper()}, expected=409)
+        assert account in admin.call(accounts)["items"]
+        member = Browser()
+        log_in_staff(member, email, secret=base64.b32decode(created["totpSecret"]))
+        assert member.call(session) == {"email": email, "canManageStaff": False}
+        member.call(order)
+        member.call(accounts, expected=403)
+        member.call(accounts, "POST", {"email": f"forbidden-{run}@example.test", "canManageStaff": True}, expected=403)
+
+        reset = admin.call(path + "/reset-totp", "POST")
+        assert reset["account"] == account and reset["totpSecret"] != created["totpSecret"]
+        member.call(order, expected=401)
+        member.call("/api/staff/orders", expected=401)
+    finally:
+        admin.call(path, "DELETE", expected=204)
+    assert all(item["id"] != account["id"] for item in admin.call(accounts)["items"])
+
+    manager_email = f"manager-{run}@example.test"
+    manager = admin.call(accounts, "POST", {"email": manager_email, "canManageStaff": True}, expected=201)
+    manager_path = f"{accounts}/{manager['account']['id']}"
+    try:
+        other_admin = Browser()
+        log_in_staff(other_admin, manager_email, secret=base64.b32decode(manager["totpSecret"]))
+        assert other_admin.call(session) == {"email": manager_email, "canManageStaff": True}
+        assert other_admin.call(accounts)["currentEmail"] == manager_email
+    finally:
+        admin.call(manager_path, "DELETE", expected=204)
+    other_admin.call(accounts, expected=401)
+    print("Verified staff provisioning, permissions, TOTP reset, and session revocation", flush=True)
 
 
 IMAGE_METADATA = b"Shop synthetic private metadata"
@@ -656,6 +709,7 @@ def main():
     assert order_url in wait_for_mail(buyer_email, "Заявка получена")
     log_in_staff(staff, STAFF, check_controls=True)
     assert any(item["id"] == order.rsplit("/", 1)[-1] for item in staff.call("/api/staff/orders")["items"])
+    check_staff_accounts(staff, buyer, order, run)
     check_catalogs(staff, buyer, run)
     check_storefront(staff, buyer)
     print("Verified order access, CSRF, and private S3 upload/download", flush=True)

@@ -69,7 +69,8 @@ management:
         readiness:
           include: readinessState,db,objectStorage
 shop:
-  staff-totp-accounts: ${SHOP_STAFF_TOTP_ACCOUNTS}
+  bootstrap-staff-totp-accounts: ${SHOP_BOOTSTRAP_STAFF_TOTP_ACCOUNTS:}
+  staff-totp-encryption-key: ${SHOP_STAFF_TOTP_ENCRYPTION_KEY}
   code-secret: ${SHOP_CODE_SECRET}
   mail-from: ${SHOP_MAIL_FROM}
   public-origin: ${SHOP_PUBLIC_ORIGIN}
