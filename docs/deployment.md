@@ -183,7 +183,7 @@ curl -fsS -o /dev/null https://demo.knitsew.ru/admin
 curl -fsS -o /dev/null https://demo.knitsew.ru/api/csrf
 ```
 
-HTTP должен вернуть `308` на тот же адрес с `https://`. Через админку опубликуйте демонстрационную витрину. С телефона откройте сайт через мобильную сеть. Проверьте отправку заявки с тестовыми данными, получение письма, вход сотрудника с TOTP и доступ к вложению. Состояние контейнеров и свежие логи доступны через `knitsew-demo-compose ps` и `knitsew-demo-compose logs --tail 100 nginx backend frontend`.
+HTTP должен вернуть `308` на тот же адрес с `https://`. После импорта откройте сайт с телефона через мобильную сеть. Проверьте отправку заявки с тестовыми данными, получение письма, вход сотрудника с TOTP и доступ к вложению. Состояние контейнеров и свежие логи доступны через `knitsew-demo-compose ps` и `knitsew-demo-compose logs --tail 100 nginx backend frontend`.
 
 После запуска включите обновление TLS. Certbot на время проверки освобождает порт `80`, копирует обновлённые файлы и запускает Nginx. Настройка рассчитана на VPS с одним сайтом.
 
@@ -203,6 +203,30 @@ certbot renew --cert-name demo.knitsew.ru --dry-run
 systemctl enable --now certbot.timer
 systemctl list-timers certbot.timer
 ```
+
+### Быстрый импорт на демо
+
+На рабочем компьютере запустите команды из корня репозитория. При первом запуске создайте окружение с Python 3.11 или новее и установите зависимости. В примере используется `python3.12`.
+
+```sh
+python3.12 -m venv "$HOME/.knitsew-catalog-import-venv"
+"$HOME/.knitsew-catalog-import-venv/bin/python" -m pip install -r infra/ops/catalog-import-requirements.txt
+```
+
+Выполните команду и введите email сотрудника демо, код из письма и текущий код из приложения-аутентификатора.
+
+```sh
+package_dir=outputs/01a1d9f7-27c8-7902-8d51-b484e7384361
+"$HOME/.knitsew-catalog-import-venv/bin/python" infra/ops/catalog_import.py import \
+  --url https://demo.knitsew.ru \
+  --workbook "$package_dir/knitsew-catalog-import.xlsx" \
+  --photos catalog-photos-2026-11-14/photos \
+  --state "$package_dir/knitsew-import-demo.json"
+```
+
+Команда обновляет товары, коллекции, баннер, галерею и подсказки на главной. При обновлении демо используйте журнал предыдущих запусков по указанному пути. Если запускаете из другой копии репозитория, скопируйте туда этот журнал. Храните его вне Git и повторяйте ту же команду после правок или обрыва связи. Карточка из журнала, которую исключили из пакета, снимается с публикации. [Формат пакета](catalog-import.md)
+
+После успешного запуска на главной должны быть баннер, два примера работ и четыре товара в «Выборе команды». В «Руси» должно быть 14 товаров. [Главная демо](https://demo.knitsew.ru/#collections) · [Коллекция «Русь»](https://demo.knitsew.ru/catalog/rus#collections)
 
 ### Тестовая оплата через ЮKassa
 
