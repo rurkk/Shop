@@ -19,6 +19,7 @@ import ru.embroidery.shop.catalog.ProductRepository
 import ru.embroidery.shop.conflict
 import ru.embroidery.shop.files.OrderFileRepository
 import ru.embroidery.shop.mail.ShopMail
+import java.time.LocalDate
 import java.util.UUID
 
 @Service
@@ -28,6 +29,7 @@ class Orders(
     private val deliveries: OrderDeliveryRepository,
     private val files: OrderFileRepository,
     private val payments: PaymentRepository,
+    private val acceptances: OrderAcceptanceRepository,
     private val history: OrderHistory,
     private val mail: ShopMail
 ) {
@@ -72,6 +74,7 @@ class Orders(
             conflict("Upload a source photo before submitting")
         }
         orders.setStatus(id, OrderStatus.IN_REVIEW)
+        mail.notifyCustomer(id, order.email, "Заявка получена", "Команда проверит заявку и напишет вам. Следите за статусом в карточке заказа.")
         return snapshot(id)
     }
 
@@ -83,7 +86,7 @@ class Orders(
         orders.setQuote(id, quote)
         history.record(id, OrderAction.QUOTED, actor.email,
             mapOf("itemKopecks" to quote.itemKopecks, "productionDays" to quote.productionDays))
-        mail.notifyCustomer(id, order.email, "Цена и срок заказа готовы")
+        mail.notifyCustomer(id, order.email, "Цена и срок заказа готовы", "Посмотрите оценку вышивки и укажите пункт выдачи СДЭК в карточке заказа.")
         return snapshot(id)
     }
 
@@ -97,7 +100,7 @@ class Orders(
         if (!files.canPublishSketch(id, fileId)) conflict("Upload a new sketch for this order")
         orders.createSketch(id, fileId, (latest?.version ?: 0) + 1)
         orders.setStatus(id, OrderStatus.SKETCH_REVIEW)
-        mail.notifyCustomer(id, order.email, "Эскиз готов к согласованию")
+        mail.notifyCustomer(id, order.email, "Эскиз готов к согласованию", "Откройте эскиз в карточке заказа, чтобы согласовать его или запросить правки.")
         return snapshot(id)
     }
 
@@ -136,7 +139,7 @@ class Orders(
         order.requireStatus(workStatus)
         payments.requireConfirmed(order)
         orders.setStatus(id, OrderStatus.READY_TO_SHIP)
-        mail.notifyCustomer(id, order.email, "Заказ готов к отправке")
+        mail.notifyCustomer(id, order.email, "Заказ готов к отправке", "Мы сообщим, когда передадим посылку в СДЭК. Следите за статусом в карточке заказа.")
         return snapshot(id)
     }
 
@@ -160,15 +163,22 @@ class Orders(
             OrderType.CUSTOM_PHOTO -> OrderStatus.AWAITING_DELIVERY_QUOTE
         }
         order.requireStatus(quoteStatus)
+        if (quote.offerValidThrough.isBefore(LocalDate.now(ORDER_TIME_ZONE))) {
+            badRequest("Offer validity date is in the past")
+        }
+        if (!quote.deliverBy.isAfter(quote.offerValidThrough)) {
+            badRequest("Delivery deadline must be after the offer validity date")
+        }
         val total = requireNotNull(order.itemKopecks) + quote.priceKopecks
         if (total > MAX_KOPECKS) badRequest("Order total exceeds the supported amount")
         deliveries.setQuote(id, quote)
         payments.create(id, total)
         orders.setStatus(id, OrderStatus.AWAITING_PAYMENT)
         history.record(id, OrderAction.DELIVERY_QUOTED, actor.email, mapOf(
-            "deliveryKopecks" to quote.priceKopecks, "deliveryDays" to quote.deliveryDays, "totalKopecks" to total
+            "deliveryKopecks" to quote.priceKopecks, "deliveryDays" to quote.deliveryDays, "totalKopecks" to total,
+            "offerValidThrough" to quote.offerValidThrough.toString(), "deliverBy" to quote.deliverBy.toString()
         ))
-        mail.notifyCustomer(id, order.email, "Заказ готов к оплате")
+        mail.notifyCustomer(id, order.email, "Условия заказа KNITSEW готовы", "Проверьте условия заказа и подтвердите их в карточке.")
         return snapshot(id)
     }
 
@@ -178,7 +188,7 @@ class Orders(
         order.requireStatus(OrderStatus.IN_REVIEW)
         orders.reject(id, reason)
         history.record(id, OrderAction.REJECTED, actor.email, mapOf("reason" to reason))
-        mail.notifyCustomer(id, order.email, "Заявка отклонена")
+        mail.notifyCustomer(id, order.email, "Заявка отклонена", "Посмотрите причину отказа в карточке заказа.")
         return snapshot(id)
     }
 
@@ -189,7 +199,7 @@ class Orders(
         payments.requireConfirmed(order)
         orders.setShipped(id, trackingNumber)
         history.record(id, OrderAction.SHIPPED, actor.email, mapOf("trackingNumber" to trackingNumber))
-        mail.notifyCustomer(id, order.email, "Заказ отправлен")
+        mail.notifyCustomer(id, order.email, "Заказ отправлен", "Трек-номер и ссылка на отслеживание СДЭК доступны в карточке заказа.")
         return snapshot(id)
     }
 
@@ -201,7 +211,8 @@ class Orders(
             delivery = deliveries.get(id),
             sourceFileIds = orders.sources(id),
             sketch = orders.latestSketch(id),
-            payment = payments.details(order)
+            payment = payments.details(order),
+            acceptance = acceptances.get(id)
         )
     }
 

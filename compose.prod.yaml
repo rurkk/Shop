@@ -8,6 +8,9 @@ services:
       SHOP_SMTP_USERNAME: ${SHOP_SMTP_USERNAME:?Set SHOP_SMTP_USERNAME}
       SHOP_SMTP_PASSWORD: ${SHOP_SMTP_PASSWORD:?Set SHOP_SMTP_PASSWORD}
 
+  frontend:
+    image: ${SHOP_FRONTEND_IMAGE:?Set SHOP_FRONTEND_IMAGE to the built frontend image}
+
   nginx:
     image: shop-nginx:production
     build:

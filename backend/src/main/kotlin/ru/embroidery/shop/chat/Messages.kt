@@ -116,7 +116,9 @@ class Messages(
         """).param("id", UUID.randomUUID()).param("order", orderId).param("clientId", input.clientMessageId)
             .param("role", actor.role.name).param("email", actor.email).param("body", body)
             .param("file", input.attachmentId, Types.OTHER).query(messageMapper).single()
-        if (actor.role == Role.STAFF) mail.notifyCustomer(orderId, order.email, "Новое сообщение по заказу")
+        if (actor.role == Role.STAFF) {
+            mail.notifyCustomer(orderId, order.email, "Новое сообщение по заказу", "Откройте карточку заказа, чтобы прочитать сообщение и ответить.")
+        }
         events.publishEvent(MessageStored(orderId))
         return message
     }

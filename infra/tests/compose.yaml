@@ -4,7 +4,6 @@ services:
       SHOP_YOOKASSA_ENABLED: "true"
       SHOP_YOOKASSA_SHOP_ID: "12345"
       SHOP_YOOKASSA_SECRET_KEY: test-ci-key
-      SHOP_PUBLIC_ORIGIN: http://127.0.0.1:18080
       SHOP_YOOKASSA_API_BASE: http://payment-stub:8080/v3
     depends_on:
       payment-stub:

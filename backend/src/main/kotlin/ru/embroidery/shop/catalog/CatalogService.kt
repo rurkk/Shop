@@ -65,21 +65,23 @@ class CatalogService(
     @Transactional
     fun createProduct(input: ProductForm): Product {
         if (input.published) conflict("Add variants to a draft product before publishing it")
-        checkProductImages(input.imageIds)
+        checkProductMediaAndMeasurements(input)
         val id = products.create(input)
-        products.replaceImages(id, input.imageIds)
+        products.replaceImages(id, input.images)
+        products.replaceMeasurements(id, input.measurements)
         return details(products.get(id), publicView = false)
     }
 
     @Transactional
     fun updateProduct(id: UUID, input: ProductForm): Product {
         products.lock(id)
-        checkProductImages(input.imageIds)
-        if (input.published && (input.imageIds.isEmpty() || !products.hasVariant(id))) {
+        checkProductMediaAndMeasurements(input)
+        if (input.published && (input.images.isEmpty() || !products.hasVariant(id))) {
             conflict("Add an image and a variant before publishing the product")
         }
         products.update(id, input)
-        products.replaceImages(id, input.imageIds)
+        products.replaceImages(id, input.images)
+        products.replaceMeasurements(id, input.measurements)
         return details(products.get(id), publicView = false)
     }
 
@@ -104,11 +106,18 @@ class CatalogService(
         if (published && !products.hasVariant(productId)) conflict("Unpublish the product before removing its last variant")
     }
 
-    private fun details(product: Product, publicView: Boolean) =
-        product.copy(images = products.images(product.id, publicView), variants = products.variants(product.id))
+    private fun details(product: Product, publicView: Boolean) = product.copy(
+        images = products.images(product.id, publicView),
+        variants = products.variants(product.id),
+        measurements = products.measurements(product.id)
+    )
 
-    private fun checkProductImages(ids: List<UUID>) {
+    private fun checkProductMediaAndMeasurements(input: ProductForm) {
+        val ids = input.images.map { it.id }
         if (ids.toSet().size != ids.size) badRequest("Product images must be distinct")
+        if (input.measurements.distinctBy { it.size.trim().lowercase() }.size != input.measurements.size) {
+            badRequest("Product measurements must be distinct by size")
+        }
         images.requireReady(ids)
     }
 

@@ -2,6 +2,10 @@ package ru.embroidery.shop.catalog
 
 import com.fasterxml.jackson.annotation.JsonSetter
 import com.fasterxml.jackson.annotation.Nulls
+import jakarta.validation.Valid
+import jakarta.validation.constraints.DecimalMax
+import jakarta.validation.constraints.DecimalMin
+import jakarta.validation.constraints.Digits
 import jakarta.validation.constraints.Max
 import jakarta.validation.constraints.Min
 import jakarta.validation.constraints.NotBlank
@@ -11,6 +15,7 @@ import jakarta.validation.constraints.Size
 import org.springframework.http.HttpStatus
 import ru.embroidery.shop.ApiFailure
 import ru.embroidery.shop.Page
+import java.math.BigDecimal
 import java.util.UUID
 
 enum class CatalogKind { COLLECTION, SELECTION }
@@ -34,8 +39,22 @@ data class ProductForm(
     @field:NotBlank @field:Size(max = 160) val design: String,
     @field:NotBlank @field:Size(max = 80) val garmentType: String,
     @field:Size(max = 4000) val description: String = "",
-    @field:Size(max = 12) @param:JsonSetter(contentNulls = Nulls.FAIL) val imageIds: List<UUID> = emptyList(),
+    @field:Valid @field:Size(max = 12) @param:JsonSetter(contentNulls = Nulls.FAIL) val images: List<ProductImageForm>,
+    @field:Valid @field:Size(max = 32) @param:JsonSetter(contentNulls = Nulls.FAIL)
+    val measurements: List<ProductMeasurements>,
     @param:JsonSetter(nulls = Nulls.FAIL) val published: Boolean = false
+)
+
+data class ProductImageForm(val id: UUID, @field:Size(max = 200) val caption: String? = null)
+
+data class ProductMeasurements(
+    @field:NotBlank @field:Size(max = 32) val size: String,
+    @field:DecimalMin("0.1") @field:DecimalMax("999.9") @field:Digits(integer = 3, fraction = 1)
+    val widthCm: BigDecimal,
+    @field:DecimalMin("0.1") @field:DecimalMax("999.9") @field:Digits(integer = 3, fraction = 1)
+    val lengthCm: BigDecimal,
+    @field:DecimalMin("0.1") @field:DecimalMax("999.9") @field:Digits(integer = 3, fraction = 1)
+    val sleeveLengthCm: BigDecimal? = null
 )
 
 data class VariantForm(
@@ -51,6 +70,8 @@ data class VariantForm(
 data class ProductPlacement(@field:PositiveOrZero @param:JsonSetter(nulls = Nulls.FAIL) val displayOrder: Int)
 
 data class ImageReference(val id: UUID, val url: String)
+
+data class ProductImage(val id: UUID, val url: String, val caption: String?)
 
 internal fun imageReference(id: UUID, public: Boolean) =
     ImageReference(id, if (public) "/api/catalog-images/$id" else "/api/staff/catalog-images/$id")
@@ -85,8 +106,9 @@ data class Product(
     val garmentType: String,
     val description: String,
     val published: Boolean,
-    val images: List<ImageReference>,
-    val variants: List<ProductVariant>
+    val images: List<ProductImage>,
+    val variants: List<ProductVariant>,
+    val measurements: List<ProductMeasurements>
 )
 
 data class ProductVariant(

@@ -1,0 +1,58 @@
+.document {
+  max-width: 770px;
+  padding-block: clamp(37px, 7vw, 92px);
+  overflow-wrap: anywhere;
+}
+
+.header {
+  display: grid;
+  gap: 14px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: clamp(20px, 3.2vw, 35px);
+}
+
+.header h1 {
+  max-width: 23ch;
+  font-size: clamp(2rem, 5.2vw, 3.5rem);
+  text-wrap: balance;
+}
+
+.header p { font-size: .875rem; }
+
+.content {
+  display: grid;
+  gap: clamp(26px, 4.5vw, 46px);
+  margin-top: clamp(25px, 4vw, 44px);
+  font-size: .975rem;
+  line-height: 1.66;
+}
+
+.content section {
+  display: grid;
+  gap: 11px;
+}
+
+.content h2 {
+  margin-bottom: 3px;
+  font-size: clamp(1.26rem, 3.3vw, 1.7rem);
+  letter-spacing: -.025em;
+  line-height: 1.2;
+}
+
+.content h3 { font-size: 1.05rem; letter-spacing: -.015em; line-height: 1.35; }
+.content p + h3 { margin-top: 7px; }
+.content a { text-decoration: underline; }
+
+.content :is(ol, ul) {
+  display: grid;
+  gap: 9px;
+  padding-inline-start: 1.4rem;
+}
+
+.content ol { list-style: decimal; }
+.content ul { list-style: disc; }
+.content dl { display: grid; gap: 13px; }
+.content dl > div { padding-block: 10px 0; border-top: 1px solid var(--line); }
+.content dt { font-weight: 700; }
+.content dd { margin-top: 3px; }
+.content dd p + p { margin-top: 4px; }

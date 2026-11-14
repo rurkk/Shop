@@ -91,8 +91,11 @@ data class OrderDetails(
     val delivery: OrderDelivery?,
     val sourceFileIds: List<UUID>,
     val sketch: Sketch?,
-    val payment: PaymentDetails?
+    val payment: PaymentDetails?,
+    val acceptance: OrderAcceptance?
 ) {
+    val offerVersion: String get() = CURRENT_OFFER_VERSION
+
     val totalKopecks: Long?
         get() = delivery?.priceKopecks?.let { requireNotNull(order.itemKopecks) + it }
 }

@@ -1,8 +1,8 @@
 package ru.embroidery.shop.files
 
 import org.slf4j.LoggerFactory
-import org.springframework.boot.actuate.health.Health
-import org.springframework.boot.actuate.health.HealthIndicator
+import org.springframework.boot.health.contributor.Health
+import org.springframework.boot.health.contributor.HealthIndicator
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.http.CacheControl
@@ -28,17 +28,18 @@ import software.amazon.awssdk.core.sync.RequestBody
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient
 import software.amazon.awssdk.regions.Region
 import software.amazon.awssdk.services.s3.S3Client
-import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
-import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.Semaphore
-import javax.imageio.ImageIO
+import java.util.concurrent.TimeUnit
 
 data class UploadedFile(val id: UUID, val mediaType: String, val byteSize: Long)
 data class ValidatedImage(val path: Path, val mediaType: String, val byteSize: Long)
+data class ImageInfo(val mediaType: String, val byteSize: Long)
 
 @Configuration
 class StorageConfiguration {
@@ -73,21 +74,75 @@ class StorageConfiguration {
 @Service
 class ImageStorage(private val s3: S3Client, settings: ShopSettings) {
     private val uploads = Semaphore(3)
+    private val catalogEncoder = Semaphore(1, true)
     private val bucket = settings.storage.bucket
 
-    fun <T> withValidatedImage(part: MultipartFile, action: (ValidatedImage) -> T): T {
+    fun <T> withValidatedImage(part: MultipartFile, action: (ValidatedImage) -> T): T = withUpload(part) { path ->
+        action(ValidatedImage(path, validateImage(path), Files.size(path)))
+    }
+
+    fun <T> withCatalogUpload(part: MultipartFile, action: (ValidatedImage) -> T): T = withUpload(part) { path ->
+        if (!catalogEncoder.tryAcquire(0, TimeUnit.SECONDS)) {
+            throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "Catalog image processing is busy")
+        }
+        try {
+            encodeCatalog(path, action)
+        } finally {
+            catalogEncoder.release()
+        }
+    }
+
+    // Legacy objects are read once by the background worker, with the same input limit as direct uploads.
+    fun migrateCatalogImage(sourceKey: String, destinationKey: String): ImageInfo {
+        catalogEncoder.acquire()
+        try {
+            return withTempFile { source ->
+                try {
+                    s3.getObject { it.bucket(bucket).key(sourceKey) }.use { input ->
+                        Files.newOutputStream(source).use { output ->
+                            if (input.copyLimitedTo(output, MAX_IMAGE_BYTES + 1) > MAX_IMAGE_BYTES) {
+                                input.abort()
+                                throw ApiFailure(HttpStatus.PAYLOAD_TOO_LARGE, "File exceeds the upload limit")
+                            }
+                        }
+                    }
+                } catch (_: SdkException) {
+                    throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "File storage is temporarily unavailable")
+                }
+                encodeCatalog(source) { image ->
+                    put(destinationKey, image)
+                    ImageInfo(image.mediaType, image.byteSize)
+                }
+            }
+        } finally {
+            catalogEncoder.release()
+        }
+    }
+
+    private fun <T> encodeCatalog(source: Path, action: (ValidatedImage) -> T): T = withTempFile { encoded ->
+        action(encodeCatalogImage(source, encoded))
+    }
+
+    private fun <T> withUpload(part: MultipartFile, action: (Path) -> T): T {
         if (part.isEmpty) throw ApiFailure(HttpStatus.BAD_REQUEST, "Upload a non-empty file")
+        if (part.size > MAX_IMAGE_BYTES) throw ApiFailure(HttpStatus.PAYLOAD_TOO_LARGE, "File exceeds the upload limit")
         if (!uploads.tryAcquire()) throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "Too many active uploads")
         try {
-            val temporary = Files.createTempFile("shop-image-", ".upload")
-            try {
+            return withTempFile { temporary ->
                 part.transferTo(temporary.toFile())
-                return action(ValidatedImage(temporary, validateImage(temporary), Files.size(temporary)))
-            } finally {
-                Files.deleteIfExists(temporary)
+                action(temporary)
             }
         } finally {
             uploads.release()
+        }
+    }
+
+    private fun <T> withTempFile(action: (Path) -> T): T {
+        val temporary = Files.createTempFile("shop-image-", ".upload")
+        try {
+            return action(temporary)
+        } finally {
+            Files.deleteIfExists(temporary)
         }
     }
 
@@ -122,43 +177,18 @@ class ImageStorage(private val s3: S3Client, settings: ShopSettings) {
             .contentType(MediaType.parseMediaType(mediaType))
             .body(body)
     }
+}
 
-    private fun validateImage(file: Path): String {
-        if (Files.size(file) > 10 * 1024 * 1024) {
-            throw ApiFailure(HttpStatus.PAYLOAD_TOO_LARGE, "File exceeds the upload limit")
-        }
-        try {
-            ImageIO.createImageInputStream(file.toFile()).use { input ->
-                val readers = ImageIO.getImageReaders(input)
-                if (!readers.hasNext()) invalidImage()
-                val reader = readers.next()
-                try {
-                    val type = when (reader.formatName.lowercase(Locale.ROOT)) {
-                        "jpeg" -> "image/jpeg"
-                        "png" -> "image/png"
-                        else -> invalidImage()
-                    }
-                    reader.setInput(input, true, true)
-                    val width = reader.getWidth(0)
-                    val height = reader.getHeight(0)
-                    if (width !in 1..6000 || height !in 1..6000 || width.toLong() * height > 20_000_000L) {
-                        throw ApiFailure(HttpStatus.BAD_REQUEST, "Image dimensions exceed the upload limit")
-                    }
-                    val sample = reader.defaultReadParam
-                    sample.setSourceSubsampling(8, 8, 0, 0)
-                    reader.read(0, sample)
-                    return type
-                } finally {
-                    reader.dispose()
-                }
-            }
-        } catch (_: IOException) {
-            invalidImage()
-        }
+private fun InputStream.copyLimitedTo(output: OutputStream, limit: Long): Long {
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var copied = 0L
+    while (copied < limit) {
+        val read = readNBytes(buffer, 0, minOf(buffer.size.toLong(), limit - copied).toInt())
+        if (read == 0) break
+        output.write(buffer, 0, read)
+        copied += read
     }
-
-    private fun invalidImage(): Nothing =
-        throw ApiFailure(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "Upload a valid JPEG or PNG image")
+    return copied
 }
 
 @Service
@@ -169,12 +199,23 @@ class FileStorage(
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
 
-    fun upload(actor: Actor, orderId: UUID, purpose: FilePurpose, part: MultipartFile): UploadedFile {
+    fun upload(actor: Actor, orderId: UUID, purpose: FilePurpose, part: MultipartFile, replaces: UUID?): UploadedFile {
         actor.requireOrder(orderId)
         return storage.withValidatedImage(part) { image ->
-            val file = repository.reserve(actor, orderId, purpose, image.mediaType, image.byteSize)
-            storage.put(file.objectKey, image)
-            repository.complete(actor, file)
+            val file = repository.reserve(actor, orderId, purpose, image.mediaType, image.byteSize, replaces)
+            try {
+                storage.put(file.objectKey, image)
+                repository.complete(actor, file)
+            } catch (error: RuntimeException) {
+                if (purpose == FilePurpose.SOURCE) {
+                    try {
+                        repository.abandonSource(file.id)
+                    } catch (cleanupError: RuntimeException) {
+                        error.addSuppressed(cleanupError)
+                    }
+                }
+                throw error
+            }
             UploadedFile(file.id, file.mediaType, file.byteSize)
         }
     }
@@ -185,6 +226,11 @@ class FileStorage(
         return storage.download(file.objectKey, file.mediaType, file.byteSize)
     }
 
+    fun removeSource(actor: Actor, orderId: UUID, fileId: UUID) {
+        actor.requireOrder(orderId)
+        repository.removeSource(actor, orderId, fileId)
+    }
+
     @Scheduled(fixedDelay = 300_000, initialDelay = 30_000)
     fun removeExpiredUploads() {
         db.sql("""
@@ -193,7 +239,8 @@ class FileStorage(
         """).update()
         val files = db.sql("""
             SELECT f.id, f.order_id FROM order_files f JOIN orders o ON o.id = f.order_id
-            WHERE o.status = 'EXPIRED' OR (NOT f.ready AND f.created_at <= now() - interval '1 hour')
+            WHERE o.status = 'EXPIRED' OR (f.deleted AND f.ready)
+               OR (NOT f.ready AND f.created_at <= now() - interval '1 hour')
             ORDER BY f.created_at, f.id LIMIT 25
         """).query { rs, _ -> rs.getObject("order_id", UUID::class.java) to rs.getObject("id", UUID::class.java) }.list()
         for ((orderId, fileId) in files) {
@@ -217,10 +264,15 @@ class OrderFilesController(private val storage: FileStorage) {
     @ResponseStatus(HttpStatus.CREATED)
     fun upload(
         @AuthenticationPrincipal actor: Actor, @PathVariable orderId: UUID,
-        @RequestParam purpose: FilePurpose, @RequestPart file: MultipartFile
-    ) = storage.upload(actor, orderId, purpose, file)
+        @RequestParam purpose: FilePurpose, @RequestPart file: MultipartFile, @RequestParam replace: UUID?
+    ) = storage.upload(actor, orderId, purpose, file, replace)
 
     @GetMapping("/api/orders/{orderId}/files/{fileId}")
     fun download(@AuthenticationPrincipal actor: Actor, @PathVariable orderId: UUID, @PathVariable fileId: UUID) =
         storage.download(actor, orderId, fileId)
+
+    @DeleteMapping("/api/orders/{orderId}/files/{fileId}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    fun removeSource(@AuthenticationPrincipal actor: Actor, @PathVariable orderId: UUID, @PathVariable fileId: UUID) =
+        storage.removeSource(actor, orderId, fileId)
 }

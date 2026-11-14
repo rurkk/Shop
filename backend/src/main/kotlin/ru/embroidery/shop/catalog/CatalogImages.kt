@@ -16,6 +16,8 @@ import org.springframework.web.bind.annotation.DeleteMapping
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestMethod
 import org.springframework.web.bind.annotation.RequestPart
 import org.springframework.web.bind.annotation.ResponseStatus
 import org.springframework.web.bind.annotation.RestController
@@ -25,26 +27,35 @@ import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBo
 import ru.embroidery.shop.ApiFailure
 import ru.embroidery.shop.badRequest
 import ru.embroidery.shop.conflict
+import ru.embroidery.shop.files.ImageInfo
 import ru.embroidery.shop.files.ImageStorage
 import ru.embroidery.shop.files.ValidatedImage
 import software.amazon.awssdk.core.exception.SdkException
 import java.util.UUID
 
-data class CatalogImage(val id: UUID, val mediaType: String, val byteSize: Long) {
-    fun objectKey() = "catalog/$id"
+enum class CatalogImageEncoding { LEGACY, SANITIZED_COPY, SANITIZED }
+
+data class CatalogImage(val id: UUID, val mediaType: String, val byteSize: Long, val encoding: CatalogImageEncoding) {
+    fun objectKey() = "catalog-clean/v1/$id"
+    fun legacyKey() = "catalog/$id"
 }
 
 @Repository
 class CatalogImageRepository(private val db: JdbcClient) {
     private val mapper = RowMapper { rs, _ ->
-        CatalogImage(rs.getObject("id", UUID::class.java), rs.getString("media_type"), rs.getLong("byte_size"))
+        CatalogImage(
+            rs.getObject("id", UUID::class.java), rs.getString("media_type"), rs.getLong("byte_size"),
+            CatalogImageEncoding.valueOf(rs.getString("encoding"))
+        )
     }
 
     fun reserve(image: ValidatedImage): CatalogImage {
-        val record = CatalogImage(UUID.randomUUID(), image.mediaType, image.byteSize)
+        val record = CatalogImage(UUID.randomUUID(), image.mediaType, image.byteSize, CatalogImageEncoding.SANITIZED)
         db.sql("""
-            INSERT INTO catalog_images (id, media_type, byte_size, status) VALUES (:id, :type, :size, 'PENDING')
-        """).param("id", record.id).param("type", record.mediaType).param("size", record.byteSize).update()
+            INSERT INTO catalog_images (id, media_type, byte_size, status, encoding)
+            VALUES (:id, :type, :size, 'PENDING', :encoding)
+        """).param("id", record.id).param("type", record.mediaType).param("size", record.byteSize)
+            .param("encoding", record.encoding.name).update()
         return record
     }
 
@@ -59,7 +70,7 @@ class CatalogImageRepository(private val db: JdbcClient) {
         if (ids.isEmpty()) return
         val ready = db.sql("""
             SELECT id FROM catalog_images
-            WHERE id IN (:ids) AND status = 'READY' ORDER BY id FOR SHARE
+            WHERE id IN (:ids) AND status = 'READY' AND encoding <> 'LEGACY' ORDER BY id FOR SHARE
         """).param("ids", ids).query(UUID::class.java).list()
         if (ready.size != ids.size) badRequest("One or more catalog images are unavailable")
     }
@@ -113,6 +124,39 @@ class CatalogImageRepository(private val db: JdbcClient) {
         db.sql("DELETE FROM catalog_images WHERE id = :id AND status = 'DELETING'").param("id", id).update()
     }
 
+    @Transactional
+    fun migrateNext(writeSafeCopy: (CatalogImage) -> ImageInfo, removeLegacy: (CatalogImage) -> Unit): Boolean {
+        val image = db.sql("""
+            SELECT * FROM catalog_images
+            WHERE status = 'READY' AND encoding <> 'SANITIZED' AND sanitize_after <= now()
+            ORDER BY (encoding = 'SANITIZED_COPY') DESC, sanitize_after, created_at, id
+            LIMIT 1 FOR UPDATE SKIP LOCKED
+        """).query(mapper).optional().orElse(null) ?: return false
+        when (image.encoding) {
+            CatalogImageEncoding.LEGACY -> {
+                val sanitized = writeSafeCopy(image)
+                db.sql("""
+                    UPDATE catalog_images
+                    SET encoding = 'SANITIZED_COPY', media_type = :type, byte_size = :size, sanitize_after = now()
+                    WHERE id = :id
+                """).param("type", sanitized.mediaType).param("size", sanitized.byteSize).param("id", image.id).update()
+            }
+            CatalogImageEncoding.SANITIZED_COPY -> {
+                removeLegacy(image)
+                db.sql("UPDATE catalog_images SET encoding = 'SANITIZED' WHERE id = :id").param("id", image.id).update()
+            }
+            CatalogImageEncoding.SANITIZED -> error("Image is already sanitized")
+        }
+        return true
+    }
+
+    fun postponeMigration(id: UUID) {
+        db.sql("""
+            UPDATE catalog_images SET sanitize_after = now() + interval '5 minutes'
+            WHERE id = :id AND status = 'READY' AND encoding <> 'SANITIZED'
+        """).param("id", id).update()
+    }
+
     private fun imageNotFound(): Nothing = throw ApiFailure(HttpStatus.NOT_FOUND, "Catalog image not found")
 }
 
@@ -120,20 +164,32 @@ class CatalogImageRepository(private val db: JdbcClient) {
 class CatalogImages(private val storage: ImageStorage, private val images: CatalogImageRepository) {
     private val logger = LoggerFactory.getLogger(javaClass)
 
-    fun upload(part: MultipartFile): ImageReference = storage.withValidatedImage(part) { image ->
+    fun upload(part: MultipartFile): ImageReference = storage.withCatalogUpload(part) { image ->
         val record = images.reserve(image)
         storage.put(record.objectKey(), image)
         images.complete(record.id)
         imageReference(record.id, public = false)
     }
 
-    fun preview(id: UUID) = images.forStaff(id).let { storage.download(it.objectKey(), it.mediaType, it.byteSize) }
+    fun preview(id: UUID) = images.forStaff(id).let {
+        requireSanitized(it)
+        storage.download(it.objectKey(), it.mediaType, it.byteSize)
+    }
 
     fun published(id: UUID, request: ServletWebRequest): ResponseEntity<StreamingResponseBody>? {
         val image = images.published(id)
+        requireSanitized(image)
         val cache = CacheControl.noCache().cachePublic()
         request.response?.setHeader(HttpHeaders.CACHE_CONTROL, cache.headerValue)
-        if (request.checkNotModified("\"$id\"")) return null
+        if (request.checkNotModified("\"clean-v1-$id\"")) return null
+        if (request.request.method == "HEAD") {
+            return ResponseEntity.ok()
+                .cacheControl(cache)
+                .header(HttpHeaders.CONTENT_DISPOSITION, "inline")
+                .contentLength(image.byteSize)
+                .contentType(MediaType.parseMediaType(image.mediaType))
+                .build()
+        }
         return storage.download(image.objectKey(), image.mediaType, image.byteSize, cache)
     }
 
@@ -158,7 +214,42 @@ class CatalogImages(private val storage: ImageStorage, private val images: Catal
         }
     }
 
+    @Scheduled(fixedDelay = 1_000)
+    fun backfillSanitizedImages() {
+        repeat(4) {
+            var processing: CatalogImage? = null
+            try {
+                val processed = images.migrateNext(
+                    writeSafeCopy = { image ->
+                        processing = image
+                        storage.migrateCatalogImage(image.legacyKey(), image.objectKey())
+                    },
+                    removeLegacy = { image ->
+                        processing = image
+                        storage.delete(image.legacyKey())
+                    }
+                )
+                if (!processed) return
+            } catch (error: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw error
+            } catch (error: Exception) {
+                val image = processing ?: throw error
+                val action = if (image.encoding == CatalogImageEncoding.LEGACY) "encode" else "remove original for"
+                logger.warn("Could not {} catalog image {} ({})", action, image.id, error.javaClass.simpleName)
+                images.postponeMigration(image.id)
+            }
+        }
+    }
+
+    private fun requireSanitized(image: CatalogImage) {
+        if (image.encoding == CatalogImageEncoding.LEGACY) {
+            throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "Catalog image is awaiting metadata removal")
+        }
+    }
+
     private fun remove(image: CatalogImage) {
+        if (image.encoding != CatalogImageEncoding.SANITIZED) storage.delete(image.legacyKey())
         storage.delete(image.objectKey())
         images.finishDeletion(image.id)
     }
@@ -166,7 +257,7 @@ class CatalogImages(private val storage: ImageStorage, private val images: Catal
 
 @RestController
 class CatalogImagesController(private val images: CatalogImages) {
-    @GetMapping("/api/catalog-images/{id}")
+    @RequestMapping("/api/catalog-images/{id}", method = [RequestMethod.GET, RequestMethod.HEAD])
     fun published(@PathVariable id: UUID, request: ServletWebRequest) = images.published(id, request)
 
     @PostMapping("/api/staff/catalog-images", consumes = [MediaType.MULTIPART_FORM_DATA_VALUE])

@@ -14,7 +14,8 @@ class ProductRepository(private val db: JdbcClient) {
         p.id, p.slug, p.name, p.garment_type, p.published,
         (SELECT pi.image_id FROM product_images pi WHERE pi.product_id = p.id
          ORDER BY pi.display_order LIMIT 1) AS cover_image_id,
-        (SELECT min(v.price_kopecks) FROM product_variants v WHERE v.product_id = p.id) AS from_price_kopecks
+        (SELECT min(v.price_kopecks) FROM product_variants v
+         WHERE v.product_id = p.id AND v.availability <> 'OUT_OF_STOCK') AS from_price_kopecks
     """.trimIndent()
 
     private val variantMapper = RowMapper { rs, _ ->
@@ -83,19 +84,45 @@ class ProductRepository(private val db: JdbcClient) {
         """), input).param("id", id).update()
     }
 
-    fun replaceImages(id: UUID, images: List<UUID>) {
+    fun replaceImages(id: UUID, images: List<ProductImageForm>) {
         db.sql("DELETE FROM product_images WHERE product_id = :product").param("product", id).update()
         images.forEachIndexed { order, image ->
             db.sql("""
-                INSERT INTO product_images (product_id, image_id, display_order)
-                VALUES (:product, :image, :displayOrder)
-            """).param("product", id).param("image", image).param("displayOrder", order).update()
+                INSERT INTO product_images (product_id, image_id, display_order, caption)
+                VALUES (:product, :image, :displayOrder, :caption)
+            """).param("product", id).param("image", image.id).param("displayOrder", order)
+                .param("caption", image.caption?.trim()?.ifEmpty { null }, Types.VARCHAR).update()
         }
     }
 
-    fun images(id: UUID, publicView: Boolean): List<ImageReference> = db.sql("""
-        SELECT image_id FROM product_images WHERE product_id = :product ORDER BY display_order
-    """).param("product", id).query(UUID::class.java).list().map { imageReference(it, publicView) }
+    fun images(id: UUID, publicView: Boolean): List<ProductImage> = db.sql("""
+        SELECT image_id, caption FROM product_images WHERE product_id = :product ORDER BY display_order
+    """).param("product", id).query { rs, _ ->
+        val image = imageReference(rs.getObject("image_id", UUID::class.java), publicView)
+        ProductImage(image.id, image.url, rs.getString("caption"))
+    }.list()
+
+    fun replaceMeasurements(id: UUID, measurements: List<ProductMeasurements>) {
+        db.sql("DELETE FROM product_measurements WHERE product_id = :product").param("product", id).update()
+        measurements.forEachIndexed { order, measurement ->
+            db.sql("""
+                INSERT INTO product_measurements (product_id, display_order, size, width_cm, length_cm, sleeve_length_cm)
+                VALUES (:product, :displayOrder, :size, :width, :length, :sleeve)
+            """).param("product", id).param("displayOrder", order).param("size", measurement.size.trim())
+                .param("width", measurement.widthCm).param("length", measurement.lengthCm)
+                .param("sleeve", measurement.sleeveLengthCm, Types.NUMERIC).update()
+        }
+    }
+
+    fun measurements(id: UUID): List<ProductMeasurements> = db.sql("""
+        SELECT size, width_cm, length_cm, sleeve_length_cm
+        FROM product_measurements WHERE product_id = :product ORDER BY display_order
+    """).param("product", id).query { rs, _ ->
+        ProductMeasurements(
+            rs.getString("size"), rs.getBigDecimal("width_cm"), rs.getBigDecimal("length_cm"),
+            rs.getBigDecimal("sleeve_length_cm")
+        )
+    }.list()
 
     fun variants(id: UUID): List<ProductVariant> = db.sql("""
         SELECT * FROM product_variants WHERE product_id = :product ORDER BY sku
@@ -149,7 +176,7 @@ class ProductRepository(private val db: JdbcClient) {
         Product(
             rs.getObject("id", UUID::class.java), rs.getString("slug"), rs.getString("name"), rs.getString("design"),
             rs.getString("garment_type"), rs.getString("description"), rs.getBoolean("published"),
-            emptyList(), emptyList()
+            emptyList(), emptyList(), emptyList()
         )
     }
 }

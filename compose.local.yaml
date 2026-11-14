@@ -12,10 +12,15 @@ services:
       SHOP_YOOKASSA_ENABLED: ${SHOP_YOOKASSA_ENABLED:-false}
       SHOP_YOOKASSA_SHOP_ID: ${SHOP_YOOKASSA_SHOP_ID:-}
       SHOP_YOOKASSA_SECRET_KEY: ${SHOP_YOOKASSA_SECRET_KEY:-}
-      SHOP_PUBLIC_ORIGIN: ${SHOP_PUBLIC_ORIGIN:-}
     depends_on:
       mailpit:
         condition: service_started
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        SHOP_GOTHAM_PRO: ${SHOP_GOTHAM_PRO:-0}
 
   nginx:
     build:

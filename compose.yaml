@@ -56,8 +56,9 @@ services:
       SHOP_S3_ACCESS_KEY: ${SHOP_S3_ACCESS_KEY:?Set SHOP_S3_ACCESS_KEY}
       SHOP_S3_SECRET_KEY: ${SHOP_S3_SECRET_KEY:?Set SHOP_S3_SECRET_KEY}
       SHOP_CODE_SECRET: ${SHOP_CODE_SECRET:?Set SHOP_CODE_SECRET}
-      SHOP_STAFF_EMAILS: ${SHOP_STAFF_EMAILS:?Set SHOP_STAFF_EMAILS}
+      SHOP_STAFF_TOTP_ACCOUNTS: ${SHOP_STAFF_TOTP_ACCOUNTS:?Set SHOP_STAFF_TOTP_ACCOUNTS}
       SHOP_MAIL_FROM: ${SHOP_MAIL_FROM:?Set SHOP_MAIL_FROM}
+      SHOP_PUBLIC_ORIGIN: ${SHOP_PUBLIC_ORIGIN:?Set SHOP_PUBLIC_ORIGIN}
       JAVA_TOOL_OPTIONS: "-Xmx384m -Djava.awt.headless=true -XX:+ExitOnOutOfMemoryError"
     networks: [edge, database, objects]
     depends_on:
@@ -78,12 +79,30 @@ services:
       timeout: 5s
       retries: 10
 
+  frontend:
+    <<: *service
+    image: ${SHOP_FRONTEND_IMAGE:-shop-frontend:local}
+    environment:
+      SHOP_BACKEND_ORIGIN: http://backend:8080
+    networks: [edge]
+    mem_limit: 384m
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/orders').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+
   nginx:
     <<: *service
     image: shop-nginx:local
     networks: [edge]
     depends_on:
       backend:
+        condition: service_healthy
+      frontend:
         condition: service_healthy
     mem_limit: 128m
 

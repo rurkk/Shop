@@ -7,18 +7,20 @@ import org.springframework.transaction.annotation.Transactional
 import ru.embroidery.shop.ApiFailure
 import ru.embroidery.shop.auth.Actor
 import ru.embroidery.shop.auth.Role
+import ru.embroidery.shop.badRequest
 import ru.embroidery.shop.conflict
 import ru.embroidery.shop.order.Order
 import ru.embroidery.shop.order.OrderRepository
 import ru.embroidery.shop.order.OrderStatus
 import ru.embroidery.shop.order.OrderType
+import java.sql.Types
 import java.util.UUID
 
 enum class FilePurpose { SOURCE, SKETCH, CHAT }
 
 data class OrderFile(
     val id: UUID, val orderId: UUID, val purpose: FilePurpose,
-    val mediaType: String, val byteSize: Long
+    val mediaType: String, val byteSize: Long, val replaces: UUID? = null
 ) {
     val objectKey get() = "orders/$orderId/$id"
 }
@@ -26,24 +28,32 @@ data class OrderFile(
 @Repository
 class OrderFileRepository(private val db: JdbcClient, private val orders: OrderRepository) {
     @Transactional
-    fun reserve(actor: Actor, orderId: UUID, purpose: FilePurpose, mediaType: String, size: Long): OrderFile {
+    fun reserve(
+        actor: Actor, orderId: UUID, purpose: FilePurpose, mediaType: String, size: Long, replaces: UUID?
+    ): OrderFile {
         val order = orders.lock(orderId)
         checkUpload(actor, order, purpose)
-        val count = db.sql("""
-            SELECT count(*) FROM order_files WHERE order_id = :order AND purpose = :purpose
-        """).param("order", orderId).param("purpose", purpose.name).query(Long::class.java).single()
-        val limit = when (purpose) {
-            FilePurpose.SOURCE -> 5
-            FilePurpose.SKETCH -> 25
-            FilePurpose.CHAT -> 100
+        if (replaces == null) {
+            checkLimit(orderId, purpose)
+        } else {
+            if (purpose != FilePurpose.SOURCE) badRequest("Only a source photo can be replaced")
+            val available = db.sql("""
+                SELECT EXISTS (SELECT 1 FROM order_files
+                    WHERE order_id = :order AND id = :file AND purpose = 'SOURCE' AND ready AND NOT deleted)
+            """).param("order", orderId).param("file", replaces).query(Boolean::class.java).single()
+            if (!available) throw ApiFailure(HttpStatus.NOT_FOUND, "Source photo not found")
+            val pending = db.sql("""
+                SELECT EXISTS (SELECT 1 FROM order_files WHERE replaces_file_id = :file AND NOT deleted)
+            """).param("file", replaces).query(Boolean::class.java).single()
+            if (pending) conflict("The source photo is already being replaced")
         }
-        if (count >= limit) conflict("Attachment limit reached")
-        val file = OrderFile(UUID.randomUUID(), orderId, purpose, mediaType, size)
+        val file = OrderFile(UUID.randomUUID(), orderId, purpose, mediaType, size, replaces)
         db.sql("""
-            INSERT INTO order_files (id, order_id, purpose, uploader_email, media_type, byte_size)
-            VALUES (:id, :order, :purpose, :uploader, :media, :size)
+            INSERT INTO order_files (id, order_id, purpose, uploader_email, media_type, byte_size, replaces_file_id)
+            VALUES (:id, :order, :purpose, :uploader, :media, :size, :replaces)
         """).param("id", file.id).param("order", orderId).param("purpose", purpose.name)
-            .param("uploader", actor.email).param("media", mediaType).param("size", size).update()
+            .param("uploader", actor.email).param("media", mediaType).param("size", size)
+            .param("replaces", replaces, Types.OTHER).update()
         return file
     }
 
@@ -51,18 +61,43 @@ class OrderFileRepository(private val db: JdbcClient, private val orders: OrderR
     fun complete(actor: Actor, file: OrderFile) {
         val order = orders.lock(file.orderId)
         checkUpload(actor, order, file.purpose)
+        file.replaces?.let { previous ->
+            val removed = db.sql("""
+                UPDATE order_files SET deleted = true
+                WHERE order_id = :order AND id = :previous AND purpose = 'SOURCE' AND ready AND NOT deleted
+            """).param("order", file.orderId).param("previous", previous).update()
+            if (removed != 1) conflict("The source photo changed before replacement")
+        }
         val updated = db.sql("""
-            UPDATE order_files SET ready = true
-            WHERE id = :id AND created_at > now() - interval '1 hour'
+            UPDATE order_files SET ready = true, replaces_file_id = NULL
+            WHERE id = :id AND NOT deleted AND NOT ready AND created_at > now() - interval '1 hour'
         """).param("id", file.id).update()
         if (updated != 1) conflict("Upload expired")
+    }
+
+    @Transactional
+    fun removeSource(actor: Actor, orderId: UUID, fileId: UUID) {
+        if (actor.role != Role.CUSTOMER) throw ApiFailure(HttpStatus.FORBIDDEN, "Customer access required")
+        val order = orders.lock(orderId)
+        order.requireType(OrderType.CUSTOM_PHOTO)
+        order.requireStatus(OrderStatus.DRAFT)
+        db.sql("""
+            UPDATE order_files SET deleted = true
+            WHERE order_id = :order AND purpose = 'SOURCE' AND NOT deleted
+              AND ((id = :file AND ready) OR replaces_file_id = :file)
+        """).param("order", orderId).param("file", fileId).update()
+    }
+
+    fun abandonSource(fileId: UUID) {
+        db.sql("UPDATE order_files SET deleted = true WHERE id = :id AND purpose = 'SOURCE' AND NOT ready")
+            .param("id", fileId).update()
     }
 
     fun visibleTo(actor: Actor, orderId: UUID, fileId: UUID): OrderFile {
         orders.get(orderId)
         return db.sql("""
             SELECT f.id, f.order_id, f.purpose, f.media_type, f.byte_size FROM order_files f
-            WHERE f.id = :file AND f.order_id = :order AND f.ready
+            WHERE f.id = :file AND f.order_id = :order AND f.ready AND NOT f.deleted
               AND (:staff
                 OR f.purpose = 'SOURCE'
                 OR (f.purpose = 'SKETCH' AND EXISTS (SELECT 1 FROM sketches WHERE file_id = f.id))
@@ -88,6 +123,19 @@ class OrderFileRepository(private val db: JdbcClient, private val orders: OrderR
         SELECT EXISTS (SELECT 1 FROM order_files
             WHERE order_id = :order AND id = :file AND purpose = 'CHAT' AND ready AND uploader_email = :email)
     """).param("order", orderId).param("file", fileId).param("email", actor.email).query(Boolean::class.java).single()
+
+    private fun checkLimit(orderId: UUID, purpose: FilePurpose) {
+        val count = db.sql("""
+            SELECT count(*) FROM order_files
+            WHERE order_id = :order AND purpose = :purpose AND NOT deleted AND replaces_file_id IS NULL
+        """).param("order", orderId).param("purpose", purpose.name).query(Long::class.java).single()
+        val limit = when (purpose) {
+            FilePurpose.SOURCE -> 5
+            FilePurpose.SKETCH -> 25
+            FilePurpose.CHAT -> 100
+        }
+        if (count >= limit) conflict("Attachment limit reached")
+    }
 
     private fun checkUpload(actor: Actor, order: Order, purpose: FilePurpose) {
         when (purpose) {

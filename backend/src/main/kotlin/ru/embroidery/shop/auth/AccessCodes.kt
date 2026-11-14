@@ -8,6 +8,9 @@ import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.Pattern
 import jakarta.validation.constraints.Size
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Qualifier
+import org.springframework.core.task.TaskExecutor
+import org.springframework.core.task.TaskRejectedException
 import org.springframework.http.HttpStatus
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.mail.MailException
@@ -21,9 +24,12 @@ import org.springframework.web.bind.annotation.ResponseStatus
 import org.springframework.web.bind.annotation.RestController
 import ru.embroidery.shop.ApiFailure
 import ru.embroidery.shop.ShopSettings
+import ru.embroidery.shop.badRequest
 import ru.embroidery.shop.mail.ShopMail
+import tools.jackson.databind.JsonNode
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.time.Instant
 import java.util.Locale
 import java.util.UUID
 import javax.crypto.Mac
@@ -31,25 +37,28 @@ import javax.crypto.spec.SecretKeySpec
 
 internal fun normalizedEmail(email: String): String = email.trim().lowercase(Locale.ROOT)
 
+private val sixDigitPattern = Regex("[0-9]{6}")
+
 @Service
-class AccessCodes(private val db: JdbcClient, settings: ShopSettings) {
+class AccessCodes(private val db: JdbcClient, private val staffAccounts: StaffAccounts, settings: ShopSettings) {
     private val random = SecureRandom()
     private val key = SecretKeySpec(settings.codeSecret.toByteArray(Charsets.UTF_8), "HmacSHA256")
 
     @Transactional
-    fun issue(scope: String, email: String): String? {
+    fun issue(scope: String, email: String, role: Role): String? {
+        val hourlyLimit = if (role == Role.STAFF) 5 else 10
         val allowed = db.sql("""
-            INSERT INTO access_mail_limits (email, window_start, last_sent_at, sent_count)
-            VALUES (:email, now(), now(), 1)
-            ON CONFLICT (email) DO UPDATE SET
-                sent_count = CASE WHEN access_mail_limits.window_start < now() - interval '1 hour'
+            INSERT INTO access_mail_limits (role, email, window_start, last_sent_at, sent_count)
+            VALUES (:role, :email, now(), now(), 1)
+            ON CONFLICT (role, email) DO UPDATE SET
+                sent_count = CASE WHEN access_mail_limits.window_start <= now() - interval '1 hour'
                                   THEN 1 ELSE access_mail_limits.sent_count + 1 END,
-                window_start = CASE WHEN access_mail_limits.window_start < now() - interval '1 hour'
+                window_start = CASE WHEN access_mail_limits.window_start <= now() - interval '1 hour'
                                     THEN now() ELSE access_mail_limits.window_start END,
                 last_sent_at = now()
             WHERE access_mail_limits.last_sent_at <= now() - interval '1 minute'
-              AND (access_mail_limits.sent_count < 10 OR access_mail_limits.window_start < now() - interval '1 hour')
-        """).param("email", email).update()
+              AND (access_mail_limits.sent_count < :hourlyLimit OR access_mail_limits.window_start <= now() - interval '1 hour')
+        """).param("role", role.name).param("email", email).param("hourlyLimit", hourlyLimit).update()
         if (allowed == 0) return null
 
         val code = random.nextInt(1_000_000).toString().padStart(6, '0')
@@ -63,19 +72,37 @@ class AccessCodes(private val db: JdbcClient, settings: ShopSettings) {
     }
 
     @Transactional
-    fun consume(scope: String, code: String): Boolean {
+    fun consume(scope: String, code: String): Boolean = consume(scope, code) { true }
+
+    @Transactional
+    fun consumeStaffCode(email: String, code: String, totp: String): Boolean {
+        val credential = staffAccounts[email] ?: return false
+        return consume(staffScope(email), code) { consumeTotp(email, credential, totp) }
+    }
+
+    private fun consume(scope: String, code: String, verifyFactor: () -> Boolean): Boolean {
         val expected = db.sql("""
             SELECT digest FROM access_codes
             WHERE scope = :scope AND attempts < 5 AND expires_at > now()
             FOR UPDATE
         """).param("scope", scope).query(ByteArray::class.java).optional().orElse(null) ?: return false
-        if (!MessageDigest.isEqual(expected, digest(scope, code))) {
+        if (!MessageDigest.isEqual(expected, digest(scope, code)) || !verifyFactor()) {
             db.sql("UPDATE access_codes SET attempts = attempts + 1 WHERE scope = :scope")
                 .param("scope", scope).update()
             return false
         }
         db.sql("DELETE FROM access_codes WHERE scope = :scope").param("scope", scope).update()
         return true
+    }
+
+    private fun consumeTotp(email: String, credential: StaffTotp, code: String): Boolean {
+        val step = credential.matchingStep(code, Instant.now()) ?: return false
+        return db.sql("""
+            INSERT INTO staff_totp_use (email, secret_fingerprint, last_step)
+            VALUES (:email, :fingerprint, :step)
+            ON CONFLICT (email, secret_fingerprint) DO UPDATE SET last_step = excluded.last_step
+            WHERE staff_totp_use.last_step < excluded.last_step
+        """).param("email", email).param("fingerprint", credential.fingerprint).param("step", step).update() == 1
     }
 
     @Scheduled(fixedDelay = 3_600_000)
@@ -96,22 +123,36 @@ data class CodeVerification(
     @field:Pattern(regexp = "[0-9]{6}") val code: String
 )
 
+data class StaffCodeVerification(
+    @field:NotBlank @field:Email @field:Size(max = 254) val email: String,
+    val code: JsonNode,
+    val totp: JsonNode
+)
+
+private fun staffScope(email: String) = "staff:$email"
+
+private fun sixDigitCode(node: JsonNode): String {
+    val code = node.stringValue(null)
+    if (code == null || !sixDigitPattern.matches(code)) badRequest("Invalid request")
+    return code
+}
+
 @RestController
 class AccessController(
     private val db: JdbcClient,
     private val codes: AccessCodes,
     private val sessions: BrowserSessions,
     private val mail: ShopMail,
-    settings: ShopSettings
+    private val staffAccounts: StaffAccounts,
+    @param:Qualifier("staffAccessMailExecutor") private val staffAccessMailExecutor: TaskExecutor
 ) {
-    private val staffEmails = settings.staffEmails.map(::normalizedEmail).toSet()
     private val logger = LoggerFactory.getLogger(javaClass)
 
     @PostMapping("/api/orders/{orderId}/access/code")
     @ResponseStatus(HttpStatus.ACCEPTED)
     fun requestOrderCode(@PathVariable orderId: UUID, @Valid @RequestBody input: CodeRequest) {
         val email = normalizedEmail(input.email)
-        if (ownsOrder(orderId, email)) send(orderScope(orderId, email), email)
+        if (ownsOrder(orderId, email)) send(orderScope(orderId, email), email, Role.CUSTOMER)
     }
 
     @PostMapping("/api/orders/{orderId}/access/verify")
@@ -129,16 +170,28 @@ class AccessController(
     @ResponseStatus(HttpStatus.ACCEPTED)
     fun requestStaffCode(@Valid @RequestBody input: CodeRequest) {
         val email = normalizedEmail(input.email)
-        if (email in staffEmails) send("staff:$email", email)
+        try {
+            staffAccessMailExecutor.execute {
+                if (staffAccounts[email] != null) {
+                    try {
+                        send(staffScope(email), email, Role.STAFF)
+                    } catch (error: RuntimeException) {
+                        logger.error("Unable to issue a staff access code ({})", error.javaClass.simpleName)
+                    }
+                }
+            }
+        } catch (_: TaskRejectedException) {
+            logger.warn("Staff access mail queue is full")
+        }
     }
 
     @PostMapping("/api/staff/access/verify")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     fun verifyStaffCode(
-        @Valid @RequestBody input: CodeVerification, request: HttpServletRequest, response: HttpServletResponse
+        @Valid @RequestBody input: StaffCodeVerification, request: HttpServletRequest, response: HttpServletResponse
     ) {
         val email = normalizedEmail(input.email)
-        if (email !in staffEmails || !codes.consume("staff:$email", input.code)) invalidCode()
+        if (!codes.consumeStaffCode(email, sixDigitCode(input.code), sixDigitCode(input.totp))) invalidCode()
         sessions.start(Actor(email, Role.STAFF), request, response)
     }
 
@@ -148,8 +201,8 @@ class AccessController(
               AND (status <> 'DRAFT' OR created_at > now() - interval '1 day'))
     """).param("id", orderId).param("email", email).query(Boolean::class.java).single()
 
-    private fun send(scope: String, email: String) {
-        val code = codes.issue(scope, email) ?: return
+    private fun send(scope: String, email: String, role: Role) {
+        val code = codes.issue(scope, email, role) ?: return
         try {
             mail.send(email, "Код доступа", "Код доступа: $code\nОн действует 10 минут.")
         } catch (error: MailException) {

@@ -1,0 +1,20 @@
+ul.photoGrid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 110px), 1fr));
+}
+
+.photo {
+  min-width: 0;
+}
+
+.photoActions {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  column-gap: 6px;
+}
+
+.photoAction {
+  min-height: 44px;
+  min-width: 44px;
+  font-size: .8rem;
+}

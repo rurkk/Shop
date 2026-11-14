@@ -1,12 +1,12 @@
-# Shop
+# KNITSEW
 
-Backend фабрики кастомной вышивки. API поддерживает два сценария заказа, ручной расчёт доставки до ПВЗ СДЭК, оплату через тестовый магазин ЮKassa, переписку и настройки витрины.
+Сайт фабрики кастомной вышивки: витрина, заказ по фото и из коллекции, карточка покупателя и админка. API поддерживает ручной расчёт доставки до ПВЗ СДЭК, оплату через тестовый магазин ЮKassa и переписку.
 
-[Требования к Shop](docs/requirements.md) описывают оба сценария заказа, первый полноценный релиз и архитектуру.
+[Требования к KNITSEW](docs/requirements.md) описывают оба сценария заказа, первый полноценный релиз и архитектуру.
 
 ## Локальный запуск
 
-Понадобятся JDK 21, Docker с Compose v2 и Python 3 для сквозной проверки.
+Понадобятся JDK 21, Docker с Compose v2 и Python 3 для сквозной проверки. Backend работает на Spring Boot 4.1 и Tomcat 11.
 
 ~~~sh
 ./backend/gradlew -p backend --no-daemon check bootJar
@@ -14,9 +14,28 @@ docker compose --env-file .env.example -f compose.yaml -f compose.local.yaml -f 
 python3 infra/tests/smoke.py
 ~~~
 
-- API доступен через [Nginx](http://127.0.0.1:18080/api/csrf), коды и уведомления попадают в [Mailpit](http://127.0.0.1:18025). Тестовая учётная запись сотрудника — staff@example.test.
+- Через Nginx доступны [витрина](http://127.0.0.1:18080/), [админка](http://127.0.0.1:18080/admin) и [API](http://127.0.0.1:18080/api/csrf). Коды из писем и уведомления попадают в [Mailpit](http://127.0.0.1:18025). Для ручной работы импортируйте тестовый секрет для `staff@example.test` из `SHOP_STAFF_TOTP_ACCOUNTS` в `.env.example` в приложение-аутентификатор. Введите код из письма и текущий код приложения.
 - Скрипт создаёт тестовые заказы и запрашивает коды для вымышленных адресов. Повторный запуск под той же почтой сотрудника возможен через минуту из-за ограничения выдачи кодов.
 - Для остановки выполните `docker compose --env-file .env.example -f compose.yaml -f compose.local.yaml -f infra/tests/compose.yaml down`. Тома сохраняются. Базу с тестовыми заказами по старой схеме 50/50 нужно пересоздать в рамках миграции на один платёж. Используйте `down --volumes` только для своего временного тестового стенда.
+
+### Витрина и браузерная проверка
+
+Чистая база содержит пустые «Выбор команды» и «Русь» и неопубликованный баннер. В админке можно загрузить фото и опубликовать витрину. Для локальной проверки после `smoke.py` загрузите [демонстрационные материалы](infra/tests/fixtures/README.md) через `python3 infra/tests/seed_storefront.py`. Скрипт рассчитан на пустую витрину с исходными каталогами и использует `fixtures@example.test`.
+
+Для прогона в Chromium понадобится Node.js 24. Тесты используют тот же стенд с Mailpit и имитатором ЮKassa.
+
+~~~sh
+cd frontend
+npm ci
+npx playwright install chromium
+npm run test:e2e
+~~~
+
+Playwright проверяет витрину при 1440 и 390 px, заказ из каталога на десктопе и заказ по фото на мобильной ширине. Для менеджерских шагов используются `ui-staff@example.test` и `ui-mobile-staff@example.test`. REST- и браузерные тесты вычисляют TOTP по тестовым секретам из `.env.example`. Для стенда с другими секретами задайте `SHOP_TEST_STAFF_TOTP_ACCOUNTS` в том же формате. Ограничения выдачи кодов допускают повторный прогон под теми же адресами через минуту.
+
+Чтобы разрабатывать с горячим обновлением при работающем Compose, запустите из `frontend/` команду `SHOP_BACKEND_ORIGIN=http://127.0.0.1:18080 npm run dev` и откройте [localhost:3000](http://127.0.0.1:3000/). Next.js получает настройки баннера на сервере и проксирует API в режиме разработки. Ссылки из писем и возврат имитатора платежей используют адрес Nginx из `SHOP_PUBLIC_ORIGIN`.
+
+Локальная сборка использует Arial. Для сборки с Gotham Pro положите лицензированные кириллические `gotham-pro-regular.woff2` и `gotham-pro-bold.woff2` в `frontend/public/fonts/`, затем задайте `SHOP_GOTHAM_PRO=1` при запуске Next.js или в аргументах сборки образа (`--build-arg SHOP_GOTHAM_PRO=1`). При включённой опции сборка требует оба файла. Шрифты в Git не хранятся.
 
 ## Заказы
 
@@ -27,15 +46,18 @@ python3 infra/tests/smoke.py
 | Создать черновик заказа из каталога с `email`, `catalogSlug`, `variantId` и `delivery` | `POST /api/orders/catalog-drafts` |
 | Запросить и подтвердить код для черновика или действующего заказа | `POST /api/orders/{id}/access/code` и `POST /api/orders/{id}/access/verify` |
 | Загрузить фото, эскиз или вложение | `POST /api/orders/{id}/files?purpose=SOURCE\|SKETCH\|CHAT`, поле multipart `file` |
-| Передать заказ менеджеру после входа по коду. Для заказа по фото сначала загрузить исходник | `POST /api/orders/{id}/submit` |
+| Заменить исходное фото в своём черновике | `POST /api/orders/{id}/files?purpose=SOURCE&replace={fileId}`, поле multipart `file` |
+| Удалить исходное фото из своего черновика | `DELETE /api/orders/{id}/files/{fileId}` |
+| Отправить заявку на проверку и расчёт после входа по коду. Для заказа по фото сначала загрузить исходник | `POST /api/orders/{id}/submit` |
 | Открыть заказ или скачать доступный файл | `GET /api/orders/{id}` или `GET /api/orders/{id}/files/{fileId}` |
 | Указать или обновить данные получателя и ПВЗ | `PUT /api/orders/{id}/delivery` |
-| Войти сотруднику | `POST /api/staff/access/code` и `POST /api/staff/access/verify` |
+| Войти сотруднику | `POST /api/staff/access/code` с `email`, затем `POST /api/staff/access/verify` с `email`, `code` из письма и `totp` из приложения-аутентификатора |
 | Открыть очередь или карточку заказа сотрудником | `GET /api/staff/orders` и `GET /api/staff/orders/{id}` |
 | Оценить заказ по фото | `POST /api/staff/orders/{id}/quote` с `itemKopecks` и `productionDays` |
 | Подтвердить ПВЗ и выставить общую сумму с доставкой | `POST /api/staff/orders/{id}/delivery-quote` |
 | Отклонить заявку при рассмотрении | `POST /api/staff/orders/{id}/reject` с `reason` |
-| Получить платёжную ссылку или сверить платёж после возврата на сайт | `POST /api/orders/{id}/payment/checkout` и `POST /api/orders/{id}/payment/sync` |
+| Подтвердить рассчитанные условия и получить платёжную ссылку | `POST /api/orders/{id}/payment/checkout` с `offerVersion` из карточки заказа |
+| Сверить платёж после возврата на сайт | `POST /api/orders/{id}/payment/sync` |
 | Начать отмену заказа до отправки | `POST /api/staff/orders/{id}/cancel` с `reason` |
 | Вернуть полную оплату при отмене или после отправки | `POST /api/staff/orders/{id}/refund` |
 | Открыть историю суммы, отмены, отправки и возврата | `GET /api/staff/orders/{id}/history` с `page` и `size` |
@@ -44,27 +66,37 @@ python3 infra/tests/smoke.py
 | Отметить готовность и после полной оплаты указать `trackingNumber` | `POST /api/staff/orders/{id}/production-complete` и `POST /api/staff/orders/{id}/shipment` |
 | Выйти из сессии | `POST /api/session/logout` |
 
-Запросы на изменение передают cookie сессии и CSRF-токен в заголовке, имя и значение которого возвращает `GET /api/csrf`. После входа нужно получить свежий токен. Код действует 10 минут, доступ покупателя ограничен одним заказом. Файлы JPEG и PNG до 10 МиБ проходят через backend и хранятся в приватном S3-совместимом бакете.
+Запросы на изменение передают cookie сессии и CSRF-токен в заголовке, имя и значение которого возвращает `GET /api/csrf`. Фронтенд получает токен перед каждым изменением, в том числе перед подтверждением кода. Код действует 10 минут, доступ покупателя ограничен одним заказом. Файлы JPEG и PNG до 10 МиБ проходят через backend и хранятся в приватном S3-совместимом бакете.
+
+Оба кода сотрудника передаются как строки из шести цифр. Запрос с пропущенным кодом или неверным форматом возвращает `400`. Неверный, просроченный или уже использованный код возвращает `401`. Сессия создаётся после проверки обоих кодов. Пять неверных попыток блокируют текущий код из письма. Каждый шаг TOTP принимается один раз, в том числе после запроса нового кода из письма. Выдача почтовых кодов ограничена отдельно для покупателей и сотрудников. Для одного адреса письмо можно запросить раз в минуту, до 10 раз в час для покупателя и до 5 раз в час для сотрудника.
+
+Покупатель может выбрать исходное фото на первом шаге. Превью открывается локально, загрузка начинается после подтверждения email. До отправки заявки покупатель может заменить фото или удалить его. При замене исходный файл доступен до успешной загрузки нового, в том числе при пяти фото в черновике. Повторное удаление возвращает `204`.
+
+Письма о заявке и изменениях заказа содержат прямую ссылку на карточку вида `SHOP_PUBLIC_ORIGIN/orders/{id}`. Доступ к карточке проверяется по сессии и коду из письма.
 
 Очередь сотрудника показывает поданные заявки и возвращает `items`, `page`, `size`, `hasMore`. Параметры `page` и `size` по умолчанию равны 0 и 24, максимальный размер страницы — 100. `type` фильтрует по `CUSTOM_PHOTO` или `CATALOG`, `status` — по этапу, `search` ищет по полному UUID заказа или email без учёта регистра.
 
 При создании черновика из каталога backend проверяет публикацию коллекции и товара, принадлежность варианта коллекции и его доступность. Карточка хранит выбранные размер, цвет, цену изделия в `order.itemKopecks` и сведения о товаре в `catalogItem`. Цена и SKU фиксируются при создании черновика.
 
-Для доставки покупатель указывает `recipientName`, `phone` в международном формате с плюсом, `city` и хотя бы одно из полей `pickupPointCode` и `pickupPointAddress`. Менеджер передаёт оба поля ПВЗ, `priceKopecks`, `deliveryDays` и `deliveryVersion` из `delivery.version`. При обновлении данных покупателем версия меняется. Попытка применить старый расчёт или провести действие вне допустимого этапа возвращает HTTP `409`.
+Для доставки покупатель указывает свои имя, фамилию и телефон (`recipientName`, `phone`), `city` и код либо адрес ПВЗ. Форма принимает телефон с пробелами, скобками и дефисами и передаёт в API номер в международном формате с плюсом. API принимает хотя бы одно из полей `pickupPointCode` и `pickupPointAddress`. Менеджер передаёт оба поля ПВЗ, `priceKopecks`, `deliveryDays` и `deliveryVersion` из `delivery.version`. При обновлении данных покупателем версия меняется. Попытка применить старый расчёт или провести действие вне допустимого этапа возвращает HTTP `409`.
 
-Карточка возвращает `delivery`, `totalKopecks` и единственный `payment` после расчёта доставки. Сумма покрывает изделие и перевозку. Подтверждение платежа открывает подготовку заказа из каталога или эскиза для вышивки по фото. [Этапы обоих типов заказа](docs/requirements.md#статусная-модель)
+При расчёте менеджер также передаёт две даты в формате `YYYY-MM-DD` по Москве: `offerValidThrough` — последний день принятия условий включительно, `deliverBy` — последний день передачи изделия получателю. Передача должна быть позже последнего дня принятия условий. Карточка возвращает обе даты в `delivery` после расчёта вместе с `totalKopecks` и `payment`. Сумма покрывает изделие и перевозку.
+
+До подтверждения заказа `acceptance` равен `null`. Первый `payment/checkout` сохраняет принятую редакцию (`offerVersion`), время (`acceptedAt`) и снимок условий, ставит подтверждение с номером заказа в очередь писем и запрашивает ссылку на оплату. Обе даты показываются покупателю до принятия условий. При несовпадении редакции, истёкшем предложении или неполном расчёте API возвращает `409`. Повтор после принятия использует редакцию из `acceptance` и существующую запись. Подтверждение платежа открывает подготовку заказа из каталога или эскиза для вышивки по фото. [Этапы обоих типов заказа](docs/requirements.md#статусная-модель)
+
+Политика доступна на `/privacy`, текущая оферта с доставкой и возвратом — на `/offer`. Принятую редакцию можно открыть по `/offer/{offerVersion}`. Ссылки на страницы есть в подвале и в формах, где это нужно покупателю. Пока документы содержат TODO, они помечены как проекты. [Что проверить перед приёмом реальных заказов](docs/legal-launch.md)
 
 Чат доступен после отправки черновика. `GET /api/orders/{id}/messages` возвращает последние сообщения и `lastSequence`, параметр `before` открывает предыдущую страницу. Отправка идёт через `POST /api/orders/{id}/messages` с `clientMessageId` для безопасного повтора. Подписка `GET /api/orders/{id}/messages/stream?after={lastSequence}` передаёт события `message.created`. При переподключении сервер использует заголовок `Last-Event-ID`, если браузер его передал.
 
 ### Тестовый магазин ЮKassa
 
-Compose из `infra/tests/compose.yaml` запускает локальный имитатор. Для проверки с ЮKassa запустите обычные `compose.yaml` и `compose.local.yaml`. В защищённом файле окружения задайте `SHOP_YOOKASSA_ENABLED=true`, `SHOP_YOOKASSA_SHOP_ID`, `SHOP_YOOKASSA_SECRET_KEY` тестового магазина и `SHOP_PUBLIC_ORIGIN` стенда. В кабинете тестового магазина укажите HTTPS-адрес `/api/payments/yookassa/webhook` и события `payment.succeeded`, `payment.canceled`, `refund.succeeded`. URL возврата ведёт на будущую карточку `/orders/{id}`. Для приёма реальных денег потребуется настроить кассу и чеки. [Инструкция ЮKassa](https://yookassa.ru/developers/payment-acceptance/testing-and-going-live/testing)
+Compose из `infra/tests/compose.yaml` запускает локальный имитатор. Для проверки с ЮKassa запустите обычные `compose.yaml` и `compose.local.yaml`. В защищённом файле окружения задайте `SHOP_YOOKASSA_ENABLED=true`, `SHOP_YOOKASSA_SHOP_ID`, `SHOP_YOOKASSA_SECRET_KEY` тестового магазина и `SHOP_PUBLIC_ORIGIN` стенда. В кабинете тестового магазина укажите HTTPS-адрес `/api/payments/yookassa/webhook` и события `payment.succeeded`, `payment.canceled`, `refund.succeeded`. URL возврата ведёт в карточку `/orders/{id}`, где проверяется состояние открытого платежа. Для приёма реальных денег потребуется настроить кассу и чеки. [Инструкция ЮKassa](https://yookassa.ru/developers/payment-acceptance/testing-and-going-live/testing)
 
 Менеджер может сверить открытый платёж и состояние возврата через `payment/sync`. При отмене с открытой ссылкой заказ ждёт результата платежа. Если деньги поступили, менеджер оформляет полный возврат. Если провайдер ещё обрабатывает возврат, карточка показывает его состояние. Повтор запроса после неопределённого ответа использует сохранённый ключ в пределах 23 часов, затем требуется сверка в кабинете. [Идемпотентность ЮKassa](https://yookassa.ru/developers/using-api/interaction-format)
 
 ## Настройки главной
 
-Опубликованные настройки доступны через `GET /api/storefront`. Сотрудник использует `GET` и `PUT /api/staff/storefront`. Запись заменяет настройки целиком и принимает `version`, `published`, `heroTitle`, `heroImageId` и массив `gallery`. У примера обязательное `embroideryImageId` и необязательные `sourceImageId` и `caption`. Порядок массива задаёт порядок показа. Изображения загружаются через `POST /api/staff/catalog-images`. Устаревшая версия настроек возвращает HTTP `409`, неопубликованная витрина публично возвращает `404`.
+Опубликованные настройки доступны через `GET /api/storefront`. Сотрудник использует `GET` и `PUT /api/staff/storefront`. Запись заменяет настройки целиком и принимает `version`, `published`, `heroTitle`, `heroImageId`, массив `gallery` и необязательные строки `photoOrderPriceHint`, `photoOrderTimingHint`, `deliveryPriceHint` до 160 символов. Ориентиры берут из подтверждённых расчётов команды. Для доставки указывают город или направление, к которому относится расчёт. Пустые строки нормализуются в `null`. У примера обязательное `embroideryImageId` и необязательные `sourceImageId` и `caption`. Порядок массива задаёт порядок показа. Изображения загружаются через `POST /api/staff/catalog-images`. Устаревшая версия настроек возвращает HTTP `409`, неопубликованная витрина публично возвращает `404`.
 
 ## Каталоги
 
@@ -78,25 +110,97 @@ Compose из `infra/tests/compose.yaml` запускает локальный и
 
 Списки принимают `page` с нуля и `size` от 1 до 100 (по умолчанию 24). Страница возвращает `items`, `page`, `size` и `hasMore`. Суммы в копейках. Поля `cover` и `images` содержат ссылки вида `{id, url}`. Фото выдаются по указанному `url` и доступны покупателю, пока опубликован хотя бы один связанный каталог или товар в опубликованном каталоге.
 
+Медиатека сохраняет JPEG и PNG без исходных метаданных, включая EXIF и GPS. Backend учитывает ориентацию в JPEG и PNG, сохраняет прозрачность PNG и пропорционально уменьшает изображения, превышающие 2,5 Мп. При обновлении уже загруженные фото обрабатываются в фоне. Пока копия отдельного фото готовится, API выдачи отвечает `503`.
+
+После обновления проверьте обработку ранее загруженных фото запросом в PostgreSQL. Пустой результат означает, что все готовые изображения обработаны и старые объекты удалены.
+
+~~~sql
+SELECT id, encoding, sanitize_after
+FROM catalog_images
+WHERE status = 'READY' AND encoding <> 'SANITIZED';
+~~~
+
 | API сотрудников | Действие |
 | --- | --- |
 | `GET /api/staff/catalogs`, `GET /api/staff/catalogs/{id}` | Посмотреть каталоги и привязанные товары, включая черновики |
 | `POST /api/staff/catalogs`, `PUT /api/staff/catalogs/{id}` | Создать или заменить каталог. Поля `slug`, `name`, `kind`, `description`, `coverImageId`, `displayOrder`, `published` |
 | `PUT /api/staff/catalogs/{id}/products/{productId}`, `DELETE /api/staff/catalogs/{id}/products/{productId}` | Привязать товар с полем `displayOrder`, изменить порядок или убрать товар |
 | `GET /api/staff/products`, `GET /api/staff/products/{id}` | Посмотреть товары, включая черновики |
-| `POST /api/staff/products`, `PUT /api/staff/products/{id}` | Создать черновик или заменить товар. Поля `slug`, `name`, `design`, `garmentType`, `description`, `imageIds`, `published` |
+| `POST /api/staff/products`, `PUT /api/staff/products/{id}` | Создать черновик или заменить товар. Поля `slug`, `name`, `design`, `garmentType`, `description`, `images`, `measurements`, `published` |
 | `POST /api/staff/products/{id}/variants`, `PUT /api/staff/products/{id}/variants/{variantId}`, `DELETE /api/staff/products/{id}/variants/{variantId}` | Создать, изменить или удалить вариант. Поля `sku`, `size`, `color`, `priceKopecks`, `availability`, `productionDays` |
 | `POST /api/staff/catalog-images`, `GET /api/staff/catalog-images/{id}`, `DELETE /api/staff/catalog-images/{id}` | Загрузить JPEG или PNG до 10 МиБ в поле multipart `file`, открыть фото для предпросмотра или удалить его после снятия всех привязок |
 
-Для публикации товара нужны хотя бы одно фото и один вариант. Первое фото в `imageIds` становится обложкой. Вариант имеет наличие `IN_STOCK`, `MADE_TO_ORDER` или `OUT_OF_STOCK`. Для `MADE_TO_ORDER` указывают `productionDays`. Наличие перед выставлением платежа подтверждает сотрудник. Для записи нужны роль сотрудника, cookie сессии и CSRF-токен. Повторяющийся `slug`, SKU или сочетание размера и цвета в одном товаре возвращает `409`.
+Для публикации товара нужны хотя бы одно фото и один вариант. Первое фото в `images` становится обложкой. При записи каждый элемент `images` содержит `id` и необязательную `caption` до 200 символов, в ответе также приходит `url`. В подписи к фото на человеке можно указать его рост и размер изделия. Элементы `measurements` содержат `size`, `widthCm`, `lengthCm` и необязательное `sleeveLengthCm`. Замеры относятся к изделию, указываются в сантиметрах с точностью до десятых. Если таблица замеров ещё не заполнена, передают пустой массив.
+
+Вариант имеет наличие `IN_STOCK`, `MADE_TO_ORDER` или `OUT_OF_STOCK`. Для `MADE_TO_ORDER` указывают `productionDays`. Наличие перед выставлением платежа подтверждает сотрудник. Для записи нужны роль сотрудника, cookie сессии и CSRF-токен. Повторяющийся `slug`, SKU или сочетание размера и цвета в одном товаре возвращает `409`.
 
 ## Один сервер
 
-`compose.yaml` поднимает PostgreSQL, SeaweedFS, backend и Nginx. `compose.prod.yaml` включает HTTPS и рабочий SMTP. Только Nginx публикует порты 80 и 443. PostgreSQL и S3 доступны приложению в отдельных закрытых сетях. Тома БД и S3 сохраняются между запусками.
+Тарифы и условия описаны в [требованиях к размещению](docs/requirements.md#размещение).
 
-1. Соберите backend вне VPS и перенесите образ на сервер через реестр или `docker save` и `docker load`. Для сервера x86-64 используйте `docker buildx build --platform linux/amd64 --load -t shop-backend:0.1.0 backend` после сборки JAR.
-2. Создайте защищённый `.env.production` с переменными из `.env.example` для БД, S3, кода доступа, списка сотрудников и отправителя. Установите уникальные секреты, email сотрудников через запятую и корректный отправитель. Для `SHOP_CODE_SECRET` можно использовать результат `openssl rand -hex 32`.
-3. Добавьте `SHOP_BACKEND_IMAGE`, `SHOP_DOMAIN`, `SHOP_TLS_DIR`, `SHOP_SMTP_HOST`, `SHOP_SMTP_USERNAME`, `SHOP_SMTP_PASSWORD` и при необходимости `SHOP_SMTP_PORT`. Укажите в `SHOP_TLS_DIR` каталог на сервере с `fullchain.pem` и `privkey.pem`. После обновления сертификата выполните `nginx -s reload` внутри контейнера Nginx.
+`compose.yaml` поднимает PostgreSQL, SeaweedFS, backend, Next.js и Nginx. `compose.prod.yaml` включает HTTPS и рабочий SMTP. Только Nginx публикует порты 80 и 443. PostgreSQL и S3 доступны приложению в отдельных закрытых сетях. Тома БД и S3 сохраняются между запусками.
+
+1. Соберите образы вне VPS и перенесите их через реестр или `docker save` и `docker load`. Для сервера x86-64 соберите JAR и выполните `docker buildx build --platform linux/amd64 --load -t shop-backend:0.1.0 backend`. Для витрины выполните `docker buildx build --platform linux/amd64 --load --build-arg SHOP_GOTHAM_PRO=1 -t shop-frontend:0.1.0 frontend` с лицензированными файлами шрифта.
+2. Создайте защищённый `.env.production` с переменными из `.env.example` для БД, S3, кода доступа и отправителя. Для `SHOP_CODE_SECRET` можно использовать результат `openssl rand -hex 32`. Настройте [вход сотрудников](#вход-сотрудников) до запуска backend.
+3. Добавьте `SHOP_BACKEND_IMAGE`, `SHOP_FRONTEND_IMAGE`, `SHOP_DOMAIN`, `SHOP_TLS_DIR`, `SHOP_SMTP_HOST`, `SHOP_SMTP_USERNAME`, `SHOP_SMTP_PASSWORD` и при необходимости `SHOP_SMTP_PORT`. В `SHOP_PUBLIC_ORIGIN` укажите HTTPS-адрес KNITSEW без пути. В `SHOP_TLS_DIR` укажите каталог на сервере с `fullchain.pem` и `privkey.pem`. После обновления сертификата выполните `nginx -s reload` внутри контейнера Nginx.
 4. Запустите `docker compose --env-file .env.production -f compose.yaml -f compose.prod.yaml up --build --wait`. Перед приёмом заказов нужны интеграция кассы, юридические документы и резервные копии с проверкой восстановления.
 
 Лимиты памяти контейнеров рассчитаны на совместный запуск на VPS с 2 vCPU и 4 ГБ. Для согласованной резервной копии на одном сервере остановите backend на время `pg_dump` базы и копирования тома SeaweedFS при остановленном `storage`. Храните зашифрованную копию вне VPS. Включите обновление TLS-сертификата и настройте копирование на выбранном хостинге.
+
+### Вход сотрудников
+
+Задайте `SHOP_STAFF_TOTP_ACCOUNTS` как список пар `email=секрет` через запятую. Для каждого рабочего адреса сгенерируйте отдельный секрет из 20 случайных байтов в Base32.
+
+~~~sh
+python3 -c 'import base64, secrets; print(base64.b32encode(secrets.token_bytes(20)).decode())'
+~~~
+
+Запишите секрет в защищённый файл окружения и передайте его сотруднику через защищённый канал отдельно от рабочей почты. В приложении-аутентификаторе укажите TOTP, 6 цифр, 30 секунд, HMAC-SHA1. Сервер допускает отклонение на один 30-секундный шаг, поэтому часы сервера и устройства должны быть синхронизированы. Для отзыва доступа удалите пару, а при утрате устройства замените секрет и заново настройте приложение. Затем пересоздайте контейнер backend командой Compose для вашего контура с `up -d --force-recreate backend`. Это применит новое окружение и завершит текущие сессии.
+
+### Тестовый стенд на VPS
+
+Соберите JAR командой `./backend/gradlew -p backend --no-daemon bootJar` вне VPS. Перенесите код и `backend/build/libs/shop.jar` на VPS. Создайте `.env.test` по образцу `.env.example` с отдельными секретами, тестовыми адресами и стандартными портами. В каталоге проекта на VPS запустите стенд с Mailpit.
+
+~~~sh
+docker compose -p embroidery-shop-test --env-file .env.test -f compose.yaml -f compose.local.yaml up --build --wait
+~~~
+
+С рабочего компьютера откройте SSH-туннель, подставив свой SSH-логин и IP сервера.
+
+~~~sh
+ssh -N -L 127.0.0.1:18080:127.0.0.1:18080 -L 127.0.0.1:18025:127.0.0.1:18025 SSH_USER@SERVER_IP
+~~~
+
+Через туннель доступны [витрина](http://127.0.0.1:18080/), [API](http://127.0.0.1:18080/api/csrf) и [Mailpit](http://127.0.0.1:18025). Для заказов используйте вымышленные контакты, тестовые изображения и сообщения. Во всех командах для стенда сохраняйте `-p embroidery-shop-test`: имя проекта определяет его контейнеры и тома. Для сквозной проверки платежей добавьте `-f infra/tests/compose.yaml` после `-f compose.local.yaml` и выполните `python3 infra/tests/smoke.py` на VPS. Передайте тесту секреты этого стенда через `SHOP_TEST_STAFF_TOTP_ACCOUNTS`.
+
+### Чтение логов тестового стенда по SSH
+
+Оператор на VPS может посмотреть логи командой `docker compose -p embroidery-shop-test --env-file .env.test -f compose.yaml -f compose.local.yaml logs --timestamps --tail 100`. Для ключа Codex предусмотрена отдельная учётная запись `shop-log-reader`. Она выдаёт состояние контейнеров и до 100 последних строк с отметками времени на контейнер, в том числе для остановленных контейнеров проекта `embroidery-shop-test`.
+
+Скрипт рассчитан на Linux с Docker Engine (`/usr/bin/docker`, сокет `/var/run/docker.sock`). Администратор один раз выполняет на тестовом VPS из каталога репозитория:
+
+~~~sh
+sudo useradd --system --user-group --no-create-home --home-dir /home/shop-log-reader --shell /bin/sh shop-log-reader
+sudo install -d -o root -g root -m 0755 /home/shop-log-reader /home/shop-log-reader/.ssh
+sudo install -o root -g root -m 0755 infra/ops/shop-test-logs.sh /usr/local/sbin/shop-test-logs
+sudo visudo -cf infra/ops/shop-test-logs.sudoers
+sudo install -o root -g root -m 0440 infra/ops/shop-test-logs.sudoers /etc/sudoers.d/shop-test-logs
+~~~
+
+На рабочем компьютере создайте отдельный ключ: `ssh-keygen -t ed25519 -f ~/.ssh/shop-test-logs -C shop-test-logs`. На VPS оставьте вход для `shop-log-reader` по паролю заблокированным и не добавляйте эту учётную запись в группу `docker`. В `/home/shop-log-reader/.ssh/authorized_keys` (владелец `root`, режим `0644`) запишите строку из файла `shop-test-logs.pub` с префиксом ниже. Приватный ключ остаётся на рабочем компьютере.
+
+~~~text
+restrict,command="/usr/bin/sudo -n /usr/local/sbin/shop-test-logs" ssh-ed25519 <публичный ключ>
+~~~
+
+На рабочем компьютере настройте SSH-алиас `shop-test-logs` в `~/.ssh/config`:
+
+~~~sshconfig
+Host shop-test-logs
+    HostName SERVER_IP
+    User shop-log-reader
+    IdentityFile ~/.ssh/shop-test-logs
+    IdentitiesOnly yes
+~~~
+
+Сверьте ключ хоста и проверьте `ssh -T -o BatchMode=yes shop-test-logs`. Подключение должно вывести снимок логов и завершиться. Если указать удалённую команду, сервер всё равно выполнит только чтение логов. Для вызова из Codex нужен разрешённый сетевой доступ к VPS. Эта схема не включает постоянный мониторинг и не собирает ошибки из консоли браузера.

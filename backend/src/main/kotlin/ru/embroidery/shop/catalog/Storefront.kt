@@ -32,6 +32,9 @@ data class StorefrontForm(
     @param:JsonSetter(nulls = Nulls.FAIL) val published: Boolean = false,
     @field:Size(max = 120) val heroTitle: String? = null,
     val heroImageId: UUID? = null,
+    @field:Size(max = 160) val photoOrderPriceHint: String? = null,
+    @field:Size(max = 160) val photoOrderTimingHint: String? = null,
+    @field:Size(max = 160) val deliveryPriceHint: String? = null,
     @field:Valid @field:Size(max = 24) @param:JsonSetter(contentNulls = Nulls.FAIL)
     val gallery: List<GalleryExampleForm> = emptyList()
 )
@@ -43,18 +46,25 @@ data class Storefront(
     val published: Boolean,
     val heroTitle: String?,
     val heroImage: ImageReference?,
+    val photoOrderPriceHint: String?,
+    val photoOrderTimingHint: String?,
+    val deliveryPriceHint: String?,
     val gallery: List<GalleryExample>
 )
 
 @Repository
 class StorefrontRepository(private val db: JdbcClient) {
     fun get(public: Boolean): Storefront = db.sql("""
-        SELECT version, published, hero_title, hero_image_id FROM storefront
+        SELECT version, published, hero_title, hero_image_id,
+               photo_order_price_hint, photo_order_timing_hint, delivery_price_hint
+        FROM storefront
         WHERE NOT :public OR published
     """).param("public", public).query { rs, _ ->
         Storefront(
             rs.getInt("version"), rs.getBoolean("published"), rs.getString("hero_title"),
             rs.getObject("hero_image_id", UUID::class.java)?.let { imageReference(it, public) },
+            rs.getString("photo_order_price_hint"), rs.getString("photo_order_timing_hint"),
+            rs.getString("delivery_price_hint"),
             emptyList()
         )
     }.optional().orElseThrow { ApiFailure(HttpStatus.NOT_FOUND, "Storefront is not published") }
@@ -72,9 +82,14 @@ class StorefrontRepository(private val db: JdbcClient) {
 
     fun update(input: StorefrontForm) {
         val updated = db.sql("""
-            UPDATE storefront SET hero_title = :title, hero_image_id = :hero, published = :published, version = version + 1
+            UPDATE storefront SET hero_title = :title, hero_image_id = :hero, published = :published,
+                photo_order_price_hint = :photoPrice, photo_order_timing_hint = :photoTiming,
+                delivery_price_hint = :deliveryPrice, version = version + 1
             WHERE version = :version
         """).param("title", input.heroTitle, Types.VARCHAR).param("hero", input.heroImageId, Types.OTHER)
+            .param("photoPrice", input.photoOrderPriceHint?.trim()?.takeIf { it.isNotEmpty() }, Types.VARCHAR)
+            .param("photoTiming", input.photoOrderTimingHint?.trim()?.takeIf { it.isNotEmpty() }, Types.VARCHAR)
+            .param("deliveryPrice", input.deliveryPriceHint?.trim()?.takeIf { it.isNotEmpty() }, Types.VARCHAR)
             .param("published", input.published).param("version", input.version).update()
         if (updated == 0) conflict("The storefront has changed")
         db.sql("DELETE FROM storefront_gallery").update()

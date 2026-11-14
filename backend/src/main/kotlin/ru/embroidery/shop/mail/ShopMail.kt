@@ -27,12 +27,13 @@ class ShopMail(
         })
     }
 
-    fun notifyCustomer(orderId: UUID, email: String, subject: String) {
+    fun notifyCustomer(orderId: UUID, email: String, subject: String, action: String) {
+        val body = "$action\n\n${settings.orderUrl(orderId)}\n\nНомер заказа: $orderId"
         db.sql("""
             INSERT INTO mail_outbox (recipient, subject, body, expires_at)
             VALUES (:recipient, :subject, :body, now() + interval '1 day')
         """).param("recipient", email).param("subject", subject)
-            .param("body", "Откройте карточку заказа $orderId, чтобы посмотреть обновление.")
+            .param("body", body)
             .update()
     }
 

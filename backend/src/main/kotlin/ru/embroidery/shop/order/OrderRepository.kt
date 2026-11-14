@@ -133,8 +133,9 @@ class OrderRepository(private val db: JdbcClient) {
     }
 
     fun sources(id: UUID): List<UUID> = db.sql("""
-        SELECT id FROM order_files WHERE order_id = :id AND purpose = 'SOURCE' AND ready ORDER BY created_at, id
-    """).param("id", id).query(UUID::class.java).list()
+        SELECT id FROM order_files WHERE order_id = :id AND purpose = 'SOURCE' AND ready AND NOT deleted
+        ORDER BY created_at, id
+    """).param("id", id).query { rs, _ -> requireNotNull(rs.getObject("id", UUID::class.java)) }.list()
 
     fun latestSketch(id: UUID): Sketch? = db.sql("""
         SELECT id, file_id, version, approved_at FROM sketches WHERE order_id = :id ORDER BY version DESC LIMIT 1

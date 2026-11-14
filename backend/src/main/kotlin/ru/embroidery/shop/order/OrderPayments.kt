@@ -3,6 +3,8 @@ package ru.embroidery.shop.order
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import jakarta.validation.Valid
+import jakarta.validation.constraints.NotBlank
+import jakarta.validation.constraints.Size
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.http.HttpStatus
 import org.springframework.security.core.annotation.AuthenticationPrincipal
@@ -13,11 +15,15 @@ import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RestController
 import ru.embroidery.shop.ApiFailure
+import ru.embroidery.shop.ShopSettings
 import ru.embroidery.shop.auth.Actor
 import ru.embroidery.shop.auth.Role
 import ru.embroidery.shop.conflict
 import ru.embroidery.shop.mail.ShopMail
+import ru.embroidery.shop.missingOrder
+import java.math.BigDecimal
 import java.time.OffsetDateTime
+import java.time.format.DateTimeFormatter
 import java.util.UUID
 
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -26,27 +32,44 @@ data class YooKassaNotification(val event: String, @param:JsonProperty("object")
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class NotificationObject(val id: UUID)
 
+data class CheckoutRequest(@field:NotBlank @field:Size(max = 64) val offerVersion: String)
+
 @Service
 class OrderPayments(
     private val orders: OrderRepository,
+    private val deliveries: OrderDeliveryRepository,
     private val payments: PaymentRepository,
+    private val acceptances: OrderAcceptanceRepository,
     private val history: OrderHistory,
     private val mail: ShopMail,
     private val gateways: ObjectProvider<YooKassa>,
+    private val settings: ShopSettings,
     private val tx: TransactionTemplate
 ) {
-    fun checkout(actor: Actor, id: UUID): PaymentDetails {
+    fun checkout(actor: Actor, id: UUID, offerVersion: String): PaymentDetails {
         actor.requireOrder(id)
         if (actor.role != Role.CUSTOMER) throw ApiFailure(HttpStatus.FORBIDDEN, "Customer access required")
         val gateway = gateway()
         tx.executeWithoutResult {
             val order = orders.lock(id)
+            if (order.email != actor.email) missingOrder()
             order.requireStatus(OrderStatus.AWAITING_PAYMENT)
-            val payment = requireNotNull(payments.forOrder(id))
+            val payment = payments.forOrder(id) ?: conflict("Offer terms are incomplete")
+            val acceptance = acceptances.get(id)
+            val expectedVersion = if (acceptance == null) CURRENT_OFFER_VERSION else acceptance.offerVersion
+            if (offerVersion != expectedVersion) {
+                conflict("Offer version has changed")
+            }
             val previous = payments.latestAttempt(payment.id)
+            if (acceptance == null) {
+                if (previous != null) conflict("Offer terms are incomplete")
+                confirmOrder(order, payment, offerVersion)
+            }
             if (previous == null || previous.status == ProviderStatus.CANCELED) {
                 gateway.requireTestShop()
-                payments.reserveAttempt(payment.id, gateway.shopId, gateway.returnUrl(id))
+                payments.reserveAttempt(payment.id, gateway.shopId, settings.orderUrl(id))
+            } else {
+                requireShop(previous, gateway)
             }
         }
         return requireNotNull(tx.execute {
@@ -61,6 +84,62 @@ class OrderPayments(
         })
     }
 
+    private fun confirmOrder(order: Order, payment: Payment, offerVersion: String) {
+        val delivery = deliveries.get(order.id) ?: conflict("Offer terms are incomplete")
+        val offerValidThrough = delivery.offerValidThrough ?: conflict("Offer terms are incomplete")
+        val deliverBy = delivery.deliverBy ?: conflict("Offer terms are incomplete")
+        val acceptedAt = OffsetDateTime.now(ORDER_TIME_ZONE)
+        if (offerValidThrough.isBefore(acceptedAt.toLocalDate())) conflict("Offer has expired")
+
+        val itemKopecks = order.itemKopecks ?: conflict("Offer terms are incomplete")
+        val deliveryKopecks = delivery.priceKopecks ?: conflict("Offer terms are incomplete")
+        if (itemKopecks + deliveryKopecks != payment.amountKopecks) conflict("Offer terms are incomplete")
+        val terms = AcceptedOrderTerms(
+            orderUrl = settings.orderUrl(order.id),
+            orderType = order.type,
+            garment = order.garment,
+            size = order.size,
+            color = order.color,
+            quantity = 1,
+            catalogItem = if (order.type == OrderType.CATALOG) orders.catalogItem(order.id) else null,
+            description = order.description,
+            sourceFileIds = orders.sources(order.id),
+            itemKopecks = itemKopecks,
+            deliveryKopecks = deliveryKopecks,
+            totalKopecks = payment.amountKopecks,
+            productionDays = order.productionDays,
+            deliveryMethod = delivery.method,
+            deliveryDays = delivery.deliveryDays ?: conflict("Offer terms are incomplete"),
+            city = delivery.city,
+            pickupPointCode = delivery.pickupPointCode ?: conflict("Offer terms are incomplete"),
+            pickupPointAddress = delivery.pickupPointAddress ?: conflict("Offer terms are incomplete"),
+            offerValidThrough = offerValidThrough,
+            deliverBy = deliverBy
+        )
+        acceptances.record(order.id, OrderAcceptance(offerVersion, acceptedAt), terms)
+        val offerUrl = settings.publicOrigin.resolve("/offer/$offerVersion").toASCIIString()
+        val productName = terms.catalogItem?.productName ?: when (Garment.valueOf(terms.garment)) {
+            Garment.HOODIE -> "Худи с вышивкой по фото"
+            Garment.T_SHIRT -> "Футболка с вышивкой по фото"
+            Garment.SWEATSHIRT -> "Свитшот с вышивкой по фото"
+        }
+        val deliveryDate = terms.deliverBy.format(DateTimeFormatter.ofPattern("dd.MM.uuuu"))
+        mail.notifyCustomer(order.id, order.email, "Заказ KNITSEW подтверждён", """
+            Вы подтвердили условия заказа.
+
+            Изделие: $productName, размер ${terms.size}, цвет ${terms.color}, ${terms.quantity} шт.
+            Стоимость изделия: ${rubles(terms.itemKopecks)}
+            Доставка: ${rubles(terms.deliveryKopecks)}
+            Всего к оплате: ${rubles(terms.totalKopecks)}
+            Пункт выдачи СДЭК: ${terms.city}, ${terms.pickupPointAddress} (${terms.pickupPointCode})
+            Передать получателю не позднее $deliveryDate.
+
+            Редакция публичной оферты $offerVersion: $offerUrl
+        """.trimIndent())
+    }
+
+    private fun rubles(kopecks: Long) = BigDecimal.valueOf(kopecks, 2).toPlainString().replace('.', ',') + " ₽"
+
     fun synchronize(actor: Actor, id: UUID): PaymentDetails {
         actor.requireOrder(id)
         val gateway = gateway()
@@ -72,6 +151,7 @@ class OrderPayments(
             when (attempt.status) {
                 ProviderStatus.CREATING -> {
                     order.requireStatus(OrderStatus.AWAITING_PAYMENT)
+                    if (acceptances.get(id) == null) conflict("Offer terms are incomplete")
                     createPayment(gateway, order, payment, attempt)
                 }
                 ProviderStatus.PENDING -> applyPayment(
@@ -106,7 +186,7 @@ class OrderPayments(
             if (payment?.paidAt == null && (attempt == null || attempt.status == ProviderStatus.CANCELED)) {
                 finishCancellation(order)
             } else {
-                mail.notifyCustomer(id, order.email, "Начата отмена заказа")
+                mail.notifyCustomer(id, order.email, "Начата отмена заказа", "Следите за состоянием отмены в карточке заказа.")
             }
         }
     }
@@ -202,9 +282,9 @@ class OrderPayments(
                         OrderType.CATALOG -> OrderStatus.PREPARING_ORDER
                     }
                     orders.setStatus(order.id, next)
-                    mail.notifyCustomer(order.id, order.email, "Оплата подтверждена")
+                    mail.notifyCustomer(order.id, order.email, "Оплата подтверждена", "Следите за подготовкой заказа в карточке.")
                 } else {
-                    mail.notifyCustomer(order.id, order.email, "Платёж поступил при отмене заказа")
+                    mail.notifyCustomer(order.id, order.email, "Платёж поступил при отмене заказа", "Следите за состоянием отмены и возврата в карточке заказа.")
                 }
             }
             ProviderStatus.CANCELED -> {
@@ -230,7 +310,7 @@ class OrderPayments(
         when (result.status) {
             ProviderStatus.SUCCEEDED -> {
                 history.record(order.id, OrderAction.REFUND_SUCCEEDED, null, details)
-                mail.notifyCustomer(order.id, order.email, "Возврат подтверждён")
+                mail.notifyCustomer(order.id, order.email, "Возврат подтверждён", "Состояние возврата доступно в карточке заказа.")
                 if (order.status == OrderStatus.CANCELLATION_REQUESTED) finishCancellation(order)
             }
             ProviderStatus.CANCELED -> history.record(order.id, OrderAction.REFUND_CANCELED, null, details)
@@ -241,7 +321,7 @@ class OrderPayments(
     private fun finishCancellation(order: Order) {
         orders.setStatus(order.id, OrderStatus.CANCELLED)
         history.record(order.id, OrderAction.CANCELLED, null)
-        mail.notifyCustomer(order.id, order.email, "Заказ отменён")
+        mail.notifyCustomer(order.id, order.email, "Заказ отменён", "Подробнее об отмене можно узнать в карточке заказа.")
     }
 
     private fun requireShop(attempt: PaymentAttempt, gateway: YooKassa) {
@@ -264,7 +344,9 @@ class OrderPayments(
 @RestController
 class OrderPaymentController(private val payments: OrderPayments, private val orders: Orders) {
     @PostMapping("/api/orders/{id}/payment/checkout")
-    fun checkout(@AuthenticationPrincipal actor: Actor, @PathVariable id: UUID) = payments.checkout(actor, id)
+    fun checkout(
+        @AuthenticationPrincipal actor: Actor, @PathVariable id: UUID, @Valid @RequestBody input: CheckoutRequest
+    ) = payments.checkout(actor, id, input.offerVersion)
 
     @PostMapping("/api/orders/{id}/payment/sync")
     fun sync(@AuthenticationPrincipal actor: Actor, @PathVariable id: UUID) = payments.synchronize(actor, id)

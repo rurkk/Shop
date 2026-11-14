@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise the local stack through Nginx using the HTTP API."""
 
+import base64
+import hmac
 import http.cookiejar
 import json
 import os
@@ -11,25 +13,33 @@ import urllib.error
 import urllib.request
 import uuid
 import zlib
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 SHOP = os.environ.get("SHOP_TEST_URL", "http://127.0.0.1:18080").rstrip("/")
 MAIL = os.environ.get("SHOP_TEST_MAIL_URL", "http://127.0.0.1:18025").rstrip("/")
 GATEWAY = os.environ.get("SHOP_TEST_GATEWAY_URL", "http://127.0.0.1:18081").rstrip("/")
 STAFF = os.environ.get("SHOP_TEST_STAFF_EMAIL", "staff@example.test")
+STAFF_ACCESS = "/api/staff/access"
+OFFER_VERSION = "2026-11-14-draft"
+OFFER_INPUT = {"offerVersion": OFFER_VERSION}
 
 
 def open_url(opener, url, method="GET", data=None, headers=None, expected=200):
+    allowed = expected if isinstance(expected, tuple) else (expected,)
     request = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
     try:
         response = opener.open(request, timeout=12)
     except urllib.error.HTTPError as error:
-        if error.code == expected:
+        if error.code in allowed:
             return error
         with error:
             detail = error.read(800).decode(errors="replace")
         raise AssertionError(f"{method} {url}: expected {expected}, got {error.code}: {detail}") from error
-    if response.status != expected:
+    if response.status not in allowed:
         with response:
             raise AssertionError(f"{method} {url}: expected {expected}, got {response.status}")
     return response
@@ -42,15 +52,18 @@ class Browser:
         self.csrf = {}
 
     def call(self, route, method="GET", value=None, expected=200, data=None, headers=None, csrf=True):
+        with self.open(route, method, value, expected, data, headers, csrf) as response:
+            content = response.read()
+            return json.loads(content) if "json" in response.headers.get("Content-Type", "") else content
+
+    def open(self, route, method="GET", value=None, expected=200, data=None, headers=None, csrf=True):
         request_headers = dict(headers or {})
         if csrf and method != "GET":
             request_headers.update(self.csrf)
         if value is not None:
             request_headers["Content-Type"] = "application/json"
             data = json.dumps(value).encode()
-        with open_url(self.opener, SHOP + route, method, data, request_headers, expected) as response:
-            content = response.read()
-            return json.loads(content) if "json" in response.headers.get("Content-Type", "") else content
+        return open_url(self.opener, SHOP + route, method, data, request_headers, expected)
 
     def renew_csrf(self):
         result = self.call("/api/csrf")
@@ -62,11 +75,11 @@ class Browser:
     def upload(self, order, purpose, image, expected=201):
         return self.upload_image(f"{order}/files?purpose={purpose}", image, expected)
 
-    def upload_image(self, route, image, expected=201):
+    def upload_image(self, route, image, expected=201, filename="photo.png", media_type="image/png"):
         boundary = "smoke-" + uuid.uuid4().hex
         body = (
-            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="photo.png"\r\n'
-            "Content-Type: image/png\r\n\r\n"
+            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            f"Content-Type: {media_type}\r\n\r\n"
         ).encode() + image + f"\r\n--{boundary}--\r\n".encode()
         return self.call(
             route, "POST", expected=expected, data=body,
@@ -102,12 +115,16 @@ def wait_for_mail(email, subject, seen=()):
     raise AssertionError(f"Mailpit did not receive {subject!r} for {email}")
 
 
-def log_in(browser, route, email, verify_wrong_code=False):
+def request_code(browser, route, email):
     browser.renew_csrf()
-    previous_session = browser.session_id()
     seen = mail_items(email, "Код доступа")
     browser.call(route + "/code", "POST", {"email": email}, expected=202)
-    code = re.search(r"\b[0-9]{6}\b", wait_for_mail(email, "Код доступа", seen)).group()
+    return re.search(r"\b[0-9]{6}\b", wait_for_mail(email, "Код доступа", seen)).group()
+
+
+def log_in(browser, route, email, verify_wrong_code=False):
+    code = request_code(browser, route, email)
+    previous_session = browser.session_id()
     if verify_wrong_code:
         wrong_code = "000000" if code != "000000" else "000001"
         browser.call(route + "/verify", "POST", {"email": email, "code": wrong_code}, expected=401)
@@ -120,16 +137,105 @@ def log_in(browser, route, email, verify_wrong_code=False):
         unauthenticated.call(route + "/verify", "POST", {"email": email, "code": code}, expected=401)
 
 
-def png():
+def staff_totp_secret(email):
+    configured = os.environ.get("SHOP_TEST_STAFF_TOTP_ACCOUNTS")
+    if configured is None:
+        example = Path(__file__).resolve().parents[2] / ".env.example"
+        configured = next(line.split("=", 1)[1] for line in example.read_text().splitlines()
+                          if line.startswith("SHOP_STAFF_TOTP_ACCOUNTS="))
+    accounts = dict(entry.split("=", 1) for entry in configured.split(","))
+    return base64.b32decode(accounts[email])
+
+
+def totp_at(secret, step):
+    digest = hmac.digest(secret, struct.pack(">Q", step), "sha1")
+    offset = digest[-1] & 15
+    value = struct.unpack_from(">I", digest, offset)[0] & 0x7FFFFFFF
+    return f"{value % 1_000_000:06d}"
+
+
+def verify_staff_factors(browser, credentials):
+    verify = STAFF_ACCESS + "/verify"
+    another = Browser()
+    another.renew_csrf()
+    sessions = (browser, another)
+    previous_sessions = [session.session_id() for session in sessions]
+
+    def verify_simultaneously(session):
+        with session.open(verify, "POST", credentials, expected=(204, 401)) as response:
+            return response.status
+
+    with ThreadPoolExecutor(max_workers=2) as requests:
+        outcomes = list(requests.map(verify_simultaneously, sessions))
+    assert sorted(outcomes) == [204, 401], "Both factors must be consumed at most once across sessions"
+    winner_index = outcomes.index(204)
+    winner, loser = sessions[winner_index], sessions[outcomes.index(401)]
+    assert winner.session_id() != previous_sessions[winner_index], "Staff login must rotate the session ID"
+    loser.call("/api/staff/orders", expected=401)
+    if winner is another:
+        browser.opener, browser.cookies = another.opener, another.cookies
+
+
+def log_in_staff(browser, email, check_controls=False):
+    secret = staff_totp_secret(email)
+    browser.call("/api/staff/orders", expected=401)
+    code = request_code(browser, STAFF_ACCESS, email)
+    previous_session = browser.session_id()
+    verify = STAFF_ACCESS + "/verify"
+    email_factor = {"email": email, "code": code}
+    if check_controls:
+        browser.call(verify, "POST", email_factor, expected=400)
+        browser.call(verify, "POST", dict(email_factor, totp=123456), expected=400)
+        current = int(time.time()) // 30
+        available = {totp_at(secret, step) for step in range(current - 1, current + 3)}
+        wrong_totp = next(f"{candidate:06d}" for candidate in range(5) if f"{candidate:06d}" not in available)
+        browser.call(verify, "POST", dict(email_factor, totp=wrong_totp), expected=401)
+        browser.call("/api/staff/orders", expected=401)
+
+        buyer = Browser()
+        order = new_order(buyer, email)
+        log_in(buyer, order + "/access", email)
+        buyer.call("/api/staff/orders", expected=403)
+
+    credentials = dict(email_factor, totp=totp_at(secret, int(time.time()) // 30))
+    if check_controls:
+        verify_staff_factors(browser, credentials)
+    else:
+        browser.call(verify, "POST", credentials, expected=204)
+        assert browser.session_id() != previous_session, "Staff login must rotate the session ID"
+    browser.renew_csrf()
+
+
+IMAGE_METADATA = b"Shop synthetic private metadata"
+
+
+def png(metadata=False):
     def chunk(name, data):
         return struct.pack(">I", len(data)) + name + data + struct.pack(">I", zlib.crc32(name + data))
 
     return (
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+        + (chunk(b"tEXt", b"Comment\0" + IMAGE_METADATA) if metadata else b"")
         + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00"))
         + chunk(b"IEND", b"")
     )
+
+
+def assert_clean_png(image):
+    assert image.startswith(b"\x89PNG\r\n\x1a\n")
+    assert IMAGE_METADATA not in image
+    position = 8
+    chunks = []
+    while position < len(image):
+        size, name = struct.unpack_from(">I4s", image, position)
+        data_end = position + 8 + size
+        assert zlib.crc32(image[position + 4:data_end]) == struct.unpack_from(">I", image, data_end)[0]
+        chunks.append(name)
+        position = data_end + 4
+    assert position == len(image)
+    assert chunks[0] == b"IHDR" and b"IDAT" in chunks and chunks[-1] == b"IEND"
+    assert not {b"tEXt", b"zTXt", b"iTXt", b"eXIf"}.intersection(chunks)
 
 
 def read_event(stream, name):
@@ -164,8 +270,11 @@ def pickup_contact():
 
 
 def delivery_quote(delivery, price):
+    today = datetime.now(ZoneInfo("Europe/Moscow")).date()
     return {"deliveryVersion": delivery["version"], "pickupPointCode": "TEST-MSK",
-            "pickupPointAddress": "Тестовая улица, 1", "priceKopecks": price, "deliveryDays": 4}
+            "pickupPointAddress": "Тестовая улица, 1", "priceKopecks": price, "deliveryDays": 4,
+            "offerValidThrough": (today + timedelta(days=3)).isoformat(),
+            "deliverBy": (today + timedelta(days=21)).isoformat()}
 
 
 def gateway_command(command, **payload):
@@ -186,9 +295,12 @@ def notify(event, provider_id, expected=200):
 
 def open_checkout(buyer, order):
     route = order + "/payment/checkout"
-    checkout = buyer.call(route, "POST")
+    checkout = buyer.call(route, "POST", OFFER_INPUT)
     assert checkout["checkoutStatus"] == "PENDING" and checkout["paidAt"] is None
-    assert buyer.call(route, "POST") == checkout
+    accepted = buyer.call(order)["acceptance"]
+    assert accepted["offerVersion"] == OFFER_VERSION and accepted["acceptedAt"]
+    assert buyer.call(route, "POST", OFFER_INPUT) == checkout
+    assert buyer.call(order)["acceptance"] == accepted
     return checkout["checkoutUrl"].rsplit("/", 1)[-1]
 
 
@@ -201,12 +313,15 @@ def check_storefront(staff, buyer):
     draft = staff.call(staff_route)
     assert not draft["published"] and draft["gallery"] == []
     staff.call(staff_route, "PUT", {"version": draft["version"], "published": True}, expected=400)
-    image = png()
+    image = png(metadata=True)
     banner = staff.upload_image("/api/staff/catalog-images", image)
     embroidery = staff.upload_image("/api/staff/catalog-images", image)
     source = staff.upload_image("/api/staff/catalog-images", image)
     form = {
         "version": draft["version"], "published": True, "heroTitle": " Вышивка по фото ", "heroImageId": banner["id"],
+        "photoOrderPriceHint": " От 4 100 ₽ за изделие с вышивкой ",
+        "photoOrderTimingHint": "Изготовление от 7 дней",
+        "deliveryPriceHint": "До ПВЗ в Москве от 350 ₽",
         "gallery": [{"embroideryImageId": embroidery["id"], "sourceImageId": source["id"], "caption": " Пример "}],
     }
     unpublished = staff.call(staff_route, "PUT", dict(form, published=False))
@@ -216,10 +331,14 @@ def check_storefront(staff, buyer):
     published = staff.call(staff_route, "PUT", dict(form, version=unpublished["version"]))
     public = visitor.call(route)
     assert public["version"] == published["version"] and public["heroTitle"] == "Вышивка по фото"
-    assert visitor.call(public["heroImage"]["url"]) == image
+    assert public["photoOrderPriceHint"] == "От 4 100 ₽ за изделие с вышивкой"
+    assert public["photoOrderTimingHint"] == form["photoOrderTimingHint"]
+    assert public["deliveryPriceHint"] == form["deliveryPriceHint"]
+    assert_clean_png(visitor.call(public["heroImage"]["url"]))
     example, = public["gallery"]
-    assert example["caption"] == "Пример" and visitor.call(example["source"]["url"]) == image
-    assert visitor.call(example["embroidery"]["url"]) == image
+    assert example["caption"] == "Пример"
+    assert_clean_png(visitor.call(example["source"]["url"]))
+    assert_clean_png(visitor.call(example["embroidery"]["url"]))
     staff.call(staff_route, "PUT", {"version": published["version"]})
     visitor.call(route, expected=404)
     visitor.call(example["source"]["url"], expected=404)
@@ -240,7 +359,7 @@ def check_cancellation(staff, buyer, order, image):
     cancellation = {"reason": "Тестовая отмена"}
     buyer.call(staff_order + "/cancel", "POST", cancellation, expected=403)
     status(staff.call(staff_order + "/cancel", "POST", cancellation), "CANCELLATION_REQUESTED")
-    buyer.call(order + "/payment/checkout", "POST", expected=409)
+    buyer.call(order + "/payment/checkout", "POST", OFFER_INPUT, expected=409)
     assert buyer.call(order)["payment"]["checkoutUrl"] is None
     staff.call(staff_order + "/refund", "POST", expected=409)
 
@@ -310,24 +429,38 @@ def check_catalog_checkout(staff, other_buyer, run, slug, variant_route, variant
     staff.call(quote_route, "POST", stale, expected=409)
     quote = delivery_quote(changed["delivery"], 30000)
     staff.call(quote_route, "POST", {key: value for key, value in quote.items() if key != "priceKopecks"}, expected=400)
+    staff.call(quote_route, "POST", {key: value for key, value in quote.items() if key != "deliverBy"}, expected=400)
+    staff.call(quote_route, "POST", dict(quote, deliverBy="2099-02-30"), expected=400)
+    staff.call(quote_route, "POST", dict(quote, deliverBy=[2099, 12, 31]), expected=400)
+    staff.call(quote_route, "POST", dict(quote, offerValidThrough="2000-01-01"), expected=400)
+    staff.call(quote_route, "POST", dict(quote, deliverBy=quote["offerValidThrough"]), expected=400)
     priced = staff.call(quote_route, "POST", quote)
     status(priced, "AWAITING_PAYMENT")
     assert priced["delivery"]["method"] == "CDEK_PICKUP" and priced["delivery"]["deliveryDays"] == 4
+    assert priced["delivery"]["offerValidThrough"] == quote["offerValidThrough"]
+    assert priced["delivery"]["deliverBy"] == quote["deliverBy"]
     assert priced["totalKopecks"] == variant["priceKopecks"] + 30000
     assert priced["payment"]["amountKopecks"] == priced["totalKopecks"]
+    assert priced["offerVersion"] == OFFER_VERSION and priced["acceptance"] is None
     assert buyer.call(order) == priced
     buyer.call(order + "/delivery", "PUT", pickup_contact(), expected=409)
     staff.call(quote_route, "POST", quote, expected=409)
     staff.call(staff_order + "/production-complete", "POST", expected=409)
     ship = {"trackingNumber": "TEST-CATALOG"}
     staff.call(staff_order + "/shipment", "POST", ship, expected=409)
-    other_buyer.call(order + "/payment/checkout", "POST", expected=404)
+    checkout_route = order + "/payment/checkout"
+    other_buyer.call(checkout_route, "POST", OFFER_INPUT, expected=404)
+    buyer.call(checkout_route, "POST", expected=400)
+    buyer.call(checkout_route, "POST", {"offerVersion": "outdated"}, expected=409)
+    assert buyer.call(order)["acceptance"] is None
     provider_id = open_checkout(buyer, order)
+    accepted = buyer.call(order)["acceptance"]
     gateway_command("payment", paymentId=provider_id, status="canceled")
     notify("payment.canceled", provider_id)
     status(buyer.call(order), "AWAITING_PAYMENT")
     replacement_id = open_checkout(buyer, order)
     assert replacement_id != provider_id
+    assert buyer.call(order)["acceptance"] == accepted
     gateway_command("payment", paymentId=replacement_id, status="succeeded")
     notify("payment.succeeded", replacement_id)
     notify("payment.succeeded", replacement_id)
@@ -336,7 +469,12 @@ def check_catalog_checkout(staff, other_buyer, run, slug, variant_route, variant
     status(staff.call(staff_order + "/production-complete", "POST"), "READY_TO_SHIP")
     status(staff.call(staff_order + "/shipment", "POST", ship), "SHIPPED")
     assert buyer.call(order)["order"]["trackingNumber"] == ship["trackingNumber"]
-    assert order_id in wait_for_mail(email, "Заказ готов к оплате")
+    assert f"{SHOP}/orders/{order_id}" in wait_for_mail(email, "Условия заказа KNITSEW готовы")
+    confirmation = wait_for_mail(email, "Заказ KNITSEW подтверждён")
+    assert f"{SHOP}/orders/{order_id}" in confirmation
+    assert f"{SHOP}/offer/{OFFER_VERSION}" in confirmation
+    assert quote["pickupPointAddress"] in confirmation
+    assert len(mail_items(email, "Заказ KNITSEW подтверждён")) == 1
     refund_route = staff_order + "/refund"
     buyer.call(refund_route, "POST", expected=403)
     requested = staff.call(refund_route, "POST")
@@ -351,7 +489,7 @@ def check_catalog_checkout(staff, other_buyer, run, slug, variant_route, variant
     assert [e["action"] for e in events] == [
         "REFUND_SUCCEEDED", "REFUND_REQUESTED", "SHIPPED", "PAYMENT_CONFIRMED", "DELIVERY_QUOTED",
     ]
-    assert all(e["createdAt"] for e in events)
+    assert all(isinstance(e["createdAt"], str) and e["createdAt"] for e in events)
     assert events[1]["actorEmail"] == events[2]["actorEmail"] == events[4]["actorEmail"] == STAFF
 
     staff.call(variant_route, "PUT", editable_variant)
@@ -374,12 +512,13 @@ def check_catalogs(staff, buyer, run):
     buyer.call(staff_catalogs, expected=403)
     staff.call(staff_catalogs, "POST", {}, expected=403, csrf=False)
 
-    visitor_image = png()
+    visitor_image = png(metadata=True)
     staff.upload_image(staff_images, b"not an image", expected=415)
     upload = staff.upload_image(staff_images, visitor_image)
     image_id = upload["id"]
     public_image = f"/api/catalog-images/{image_id}"
-    assert staff.call(upload["url"]) == visitor_image
+    staff_image = staff.call(upload["url"])
+    assert_clean_png(staff_image)
     visitor.call(public_image, expected=404)
     buyer.call(upload["url"], expected=403)
 
@@ -396,7 +535,8 @@ def check_catalogs(staff, buyer, run):
     product_slug = f"test-hoodie-{run}"
     product = {
         "slug": product_slug, "name": "Тестовое худи", "design": "Тестовый дизайн",
-        "garmentType": "Худи", "imageIds": [image_id],
+        "garmentType": "Худи", "images": [{"id": image_id, "caption": "Вышивка крупным планом"}],
+        "measurements": [],
     }
     draft = staff.call(staff_products, "POST", product, expected=201)
     product_id = draft["id"]
@@ -423,21 +563,30 @@ def check_catalogs(staff, buyer, run):
     variant_route = f"{variants_route}/{made['id']}"
     stock = staff.call(variant_route, "PUT", dict(variant, availability="IN_STOCK", productionDays=None))
     assert stock["id"] == made["id"] and stock["availability"] == "IN_STOCK"
-    staff.call(product_route, "PUT", published_product)
+    measurements = [{"size": "M", "widthCm": 57.5, "lengthCm": 68, "sleeveLengthCm": 62}]
+    staff.call(product_route, "PUT", dict(published_product, measurements=measurements))
     staff.call(variant_route, "DELETE", expected=409)
 
     team_catalog = entries[0]["id"]
     team_placement = f"{staff_catalogs}/{team_catalog}/products/{product_id}"
     staff.call(team_placement, "PUT", {"displayOrder": 40}, expected=204)
     try:
-        assert visitor.call(public_product)["variants"] == [stock]
+        product_details = visitor.call(public_product)
+        assert product_details["variants"] == [stock]
+        assert product_details["measurements"] == measurements
+        assert product_details["images"] == [{"id": image_id, "url": public_image, "caption": "Вышивка крупным планом"}]
         row = visitor.call(public_catalog)["products"]["items"][0]
         assert row["fromPriceKopecks"] == stock["priceKopecks"] and row["displayOrder"] == 5
         assert row["cover"]["url"] == public_image
-        with open_url(visitor.opener, SHOP + public_image) as response:
-            assert response.read() == visitor_image
+        with open_url(visitor.opener, SHOP + public_image, headers={"If-None-Match": f'"{image_id}"'}) as response:
+            assert response.read() == staff_image
             assert "no-cache" in response.headers["Cache-Control"]
             cache_headers = {"If-None-Match": response.headers["ETag"]}
+            assert cache_headers["If-None-Match"] != f'"{image_id}"'
+        with open_url(visitor.opener, SHOP + public_image, method="HEAD") as response:
+            assert response.headers["ETag"] == cache_headers["If-None-Match"]
+            assert int(response.headers["Content-Length"]) == len(staff_image)
+            assert response.read() == b""
         visitor.call(public_image, headers=cache_headers, expected=304)
         team = visitor.call(catalogs + "/team-choice")["products"]["items"]
         assert any(item["id"] == product_id and item["displayOrder"] == 40 for item in team)
@@ -456,7 +605,7 @@ def check_catalogs(staff, buyer, run):
         staff.call(catalog, "PUT", form)
 
     visitor.call(public_image, headers=cache_headers, expected=404)
-    staff.call(product_route, "PUT", dict(product, imageIds=[]))
+    staff.call(product_route, "PUT", dict(product, images=[]))
     staff.call(upload["url"], "DELETE", expected=204)
     staff.call(upload["url"], expected=404)
     print("Verified catalog checkout, payment retry, shipment, refund, and staff history", flush=True)
@@ -467,10 +616,14 @@ def main():
     run = uuid.uuid4().hex[:12]
     buyer_email = f"buyer-{run}@example.test"
     other_email = f"other-{run}@example.test"
-    image = png()
+    image = png(metadata=True)
 
     buyer.call("/actuator/health/readiness", expected=404)
     buyer.call("/api/orders/drafts", "POST", {}, expected=403, csrf=False)
+    buyer.renew_csrf()
+    draft = {"email": buyer_email, "garment": "HOODIE", "size": "M", "color": "черный"}
+    buyer.call("/api/orders/drafts", "POST", dict(draft, garment=0), expected=400)
+    buyer.call("/api/orders/drafts", "POST", dict(draft, unexpected=True), expected=400)
     order = new_order(buyer, buyer_email)
     staff_order = order.replace("/api/orders/", "/api/staff/orders/", 1)
     buyer.call(order, expected=401)
@@ -482,20 +635,37 @@ def main():
     buyer.call(order + "/submit", "POST", expected=409)
     buyer.upload(order, "SOURCE", b"this file contains plain text", expected=415)
     source = buyer.upload(order, "SOURCE", image)
-    assert buyer.call(order + "/files/" + source["id"]) == image
-    other.call(order + "/files/" + source["id"], expected=404)
+    source_path = order + "/files/" + source["id"]
+    assert buyer.call(source_path) == image
+    other.call(source_path, expected=404)
+    replace_path = f"{order}/files?purpose=SOURCE&replace={source['id']}"
+    buyer.upload_image(replace_path, b"invalid replacement", expected=415)
+    assert buyer.call(source_path) == image
+    replacement = buyer.upload_image(replace_path, image)
+    replacement_path = order + "/files/" + replacement["id"]
+    buyer.call(source_path, expected=404)
+    assert buyer.call(order)["sourceFileIds"] == [replacement["id"]]
+    for _ in range(2):
+        buyer.call(replacement_path, "DELETE", expected=204)
+    buyer.call(order + "/submit", "POST", expected=409)
+    last_photo = buyer.upload(order, "SOURCE", image)
     status(buyer.call(order + "/submit", "POST"), "IN_REVIEW")
-    log_in(staff, "/api/staff/access", STAFF)
+    status(buyer.call(order + "/submit", "POST"), "IN_REVIEW")
+    buyer.call(f"{order}/files/{last_photo['id']}", "DELETE", expected=409)
+    order_url = f"{SHOP}{order.removeprefix('/api')}"
+    assert order_url in wait_for_mail(buyer_email, "Заявка получена")
+    log_in_staff(staff, STAFF, check_controls=True)
     assert any(item["id"] == order.rsplit("/", 1)[-1] for item in staff.call("/api/staff/orders")["items"])
     check_catalogs(staff, buyer, run)
     check_storefront(staff, buyer)
     print("Verified order access, CSRF, and private S3 upload/download", flush=True)
+    staff.call(staff_order + "/quote", "POST", {"itemKopecks": 175001.5, "productionDays": 7}, expected=400)
     quote = staff.call(
         staff_order + "/quote", "POST", {"itemKopecks": 175001, "productionDays": 7},
     )
     status(quote, "AWAITING_DELIVERY_QUOTE")
     assert quote["totalKopecks"] is None and quote["payment"] is None
-    buyer.call(order + "/payment/checkout", "POST", expected=409)
+    buyer.call(order + "/payment/checkout", "POST", OFFER_INPUT, expected=409)
     delivery_route = staff_order + "/delivery-quote"
     staff.call(delivery_route, "POST", delivery_quote({"version": 1}, 30000), expected=409)
     with_contact = buyer.call(order + "/delivery", "PUT", pickup_contact())
@@ -504,11 +674,14 @@ def main():
     assert priced["totalKopecks"] == priced["payment"]["amountKopecks"] == 205001
     staff.upload(order, "SKETCH", image, expected=409)
     gateway_command("lose-payment-response")
-    buyer.call(order + "/payment/checkout", "POST", expected=502)
-    assert buyer.call(order)["payment"]["checkoutStatus"] == "CREATING"
+    buyer.call(order + "/payment/checkout", "POST", OFFER_INPUT, expected=502)
+    interrupted = buyer.call(order)
+    assert interrupted["payment"]["checkoutStatus"] == "CREATING"
+    assert interrupted["acceptance"]["offerVersion"] == OFFER_VERSION
     recovered = buyer.call(order + "/payment/sync", "POST")
     provider_id = open_checkout(buyer, order)
     assert recovered["checkoutUrl"].endswith(provider_id)
+    assert buyer.call(order)["acceptance"] == interrupted["acceptance"]
     notify("payment.succeeded", provider_id)
     status(buyer.call(order), "AWAITING_PAYMENT")
     gateway_command("payment", paymentId=provider_id, status="succeeded", value="2050.00")
@@ -538,7 +711,8 @@ def main():
     assert history["messages"] == [sent, reply]
     assert buyer.call(f"{order}/messages?before={reply['sequence']}")["messages"] == [sent]
     assert history["lastSequence"] == reply["sequence"]
-    assert "Откройте карточку заказа" in wait_for_mail(buyer_email, "Новое сообщение по заказу")
+    assert order_url in wait_for_mail(buyer_email, "Новое сообщение по заказу")
+    assert len(mail_items(buyer_email, "Заявка получена")) == 1
     print("Verified live SSE, replay, idempotent messages, and order email", flush=True)
 
     sketch_file = staff.upload(order, "SKETCH", image)["id"]

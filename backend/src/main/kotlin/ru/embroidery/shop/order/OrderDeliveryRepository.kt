@@ -1,5 +1,6 @@
 package ru.embroidery.shop.order
 
+import com.fasterxml.jackson.annotation.JsonFormat
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonSetter
 import com.fasterxml.jackson.annotation.Nulls
@@ -13,7 +14,14 @@ import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
 import ru.embroidery.shop.badRequest
 import ru.embroidery.shop.conflict
+import tools.jackson.core.JsonParser
+import tools.jackson.core.JsonToken
+import tools.jackson.databind.DeserializationContext
+import tools.jackson.databind.annotation.JsonDeserialize
+import tools.jackson.databind.deser.std.StdScalarDeserializer
 import java.sql.Types
+import java.time.LocalDate
+import java.time.format.DateTimeParseException
 import java.util.UUID
 
 data class DeliveryContact(
@@ -39,8 +47,29 @@ data class DeliveryQuote(
     @field:NotBlank @field:Size(max = 300) val pickupPointAddress: String,
     @field:PositiveOrZero @field:Max(MAX_KOPECKS)
     @param:JsonProperty(required = true) @param:JsonSetter(nulls = Nulls.FAIL) val priceKopecks: Long,
-    @field:Positive val deliveryDays: Int
+    @field:Positive val deliveryDays: Int,
+    @param:JsonDeserialize(using = OrderDateDeserializer::class)
+    val offerValidThrough: LocalDate,
+    @param:JsonDeserialize(using = OrderDateDeserializer::class)
+    val deliverBy: LocalDate
 )
+
+internal class OrderDateDeserializer : StdScalarDeserializer<LocalDate>(LocalDate::class.java) {
+    override fun deserialize(parser: JsonParser, context: DeserializationContext): LocalDate {
+        if (!parser.hasToken(JsonToken.VALUE_STRING)) return context.reportInputMismatch(this, "Expected a YYYY-MM-DD date")
+        val date = parser.string
+        if (!date.matches(isoDate)) return context.reportInputMismatch(this, "Expected a YYYY-MM-DD date")
+        return try {
+            LocalDate.parse(date)
+        } catch (_: DateTimeParseException) {
+            context.reportInputMismatch(this, "Expected a valid calendar date")
+        }
+    }
+
+    private companion object {
+        val isoDate = Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}")
+    }
+}
 
 enum class DeliveryMethod { CDEK_PICKUP }
 
@@ -53,7 +82,9 @@ data class OrderDelivery(
     val pickupPointCode: String?,
     val pickupPointAddress: String?,
     val priceKopecks: Long?,
-    val deliveryDays: Int?
+    val deliveryDays: Int?,
+    @get:JsonFormat(shape = JsonFormat.Shape.STRING) val offerValidThrough: LocalDate?,
+    @get:JsonFormat(shape = JsonFormat.Shape.STRING) val deliverBy: LocalDate?
 )
 
 @Repository
@@ -66,7 +97,9 @@ class OrderDeliveryRepository(private val db: JdbcClient) {
             rs.getString("recipient_name"), rs.getString("phone"), rs.getString("city"),
             rs.getString("pickup_point_code"), rs.getString("pickup_point_address"),
             rs.getObject("price_kopecks", Long::class.javaObjectType),
-            rs.getObject("delivery_days", Int::class.javaObjectType)
+            rs.getObject("delivery_days", Int::class.javaObjectType),
+            rs.getObject("offer_valid_through", LocalDate::class.java),
+            rs.getObject("deliver_by", LocalDate::class.java)
         )
     }.optional().orElse(null)
 
@@ -94,11 +127,13 @@ class OrderDeliveryRepository(private val db: JdbcClient) {
     fun setQuote(orderId: UUID, quote: DeliveryQuote) {
         val updated = db.sql("""
             UPDATE order_deliveries
-            SET pickup_point_code = :code, pickup_point_address = :address, price_kopecks = :price, delivery_days = :days
+            SET pickup_point_code = :code, pickup_point_address = :address, price_kopecks = :price,
+                delivery_days = :days, offer_valid_through = :offerValidThrough, deliver_by = :deliverBy
             WHERE order_id = :order AND version = :version AND price_kopecks IS NULL
         """).param("order", orderId).param("code", quote.pickupPointCode.trim())
             .param("address", quote.pickupPointAddress.trim()).param("price", quote.priceKopecks)
-            .param("days", quote.deliveryDays).param("version", quote.deliveryVersion).update()
+            .param("days", quote.deliveryDays).param("version", quote.deliveryVersion)
+            .param("offerValidThrough", quote.offerValidThrough).param("deliverBy", quote.deliverBy).update()
         if (updated == 0) conflict("Delivery details are missing or have changed")
     }
 }
