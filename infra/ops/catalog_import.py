@@ -51,6 +51,13 @@ PRICE_LIMIT = 9_007_199_254_740_991
 AVAILABILITY = {"В наличии": "IN_STOCK", "Под заказ": "MADE_TO_ORDER", "Нет в наличии": "OUT_OF_STOCK"}
 IMAGE_FORMATS = {"JPEG": "image/jpeg", "PNG": "image/png"}
 IMAGE_EXTENSIONS = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG"}
+PHOTO_CAPTIONS = {
+    "studio": "Студийная визуализация на основе фото изделия",
+    "cover": None,
+    "original": "Фото изделия",
+    "detail": "Вышивка крупным планом",
+    "alternate": "Дополнительный ракурс",
+}
 
 
 class ImportFailure(Exception):
@@ -63,6 +70,10 @@ class Photo:
     relative: str
     digest: str
     media_type: str
+
+    @property
+    def role(self):
+        return self.path.stem.split("-", 1)[1]
 
 
 @dataclass
@@ -79,10 +90,8 @@ class Product:
         return self.form["slug"]
 
     def with_images(self, image_ids):
-        images = []
-        for index, image_id in enumerate(image_ids):
-            caption = (None, "Вышивка крупным планом", "Дополнительный ракурс")[min(index, 2)]
-            images.append({"id": image_id, "caption": caption})
+        images = [{"id": image_id, "caption": PHOTO_CAPTIONS[item.role]}
+                  for item, image_id in zip(self.photos, image_ids, strict=True)]
         return dict(self.form, images=images)
 
 
@@ -186,8 +195,10 @@ def product_photos(root, folder):
         numbers.add(match[1])
         photos.append(photo(root, path))
     stems = [item.path.stem for item in photos]
-    if not 2 <= len(photos) <= 12 or stems[:2] != ["01-cover", "02-detail"]:
-        raise ImportFailure(f"В {folder.name} нужны обложка 01-cover и крупный план 02-detail. Максимум 12 фото")
+    first = ["01-studio", "02-original", "03-detail"] if stems[:1] == ["01-studio"] else ["01-cover", "02-detail"]
+    if stems[:len(first)] != first or len(photos) > 12 or any(item.role != "alternate" for item in photos[len(first):]):
+        raise ImportFailure(f"В {folder.name} нужны 01-studio, 02-original, 03-detail или 01-cover, 02-detail. "
+                            "Прочие фото обозначьте alternate. Максимум 12 фото")
     if len({item.digest for item in photos}) != len(photos):
         raise ImportFailure(f"В {folder.name} повторяется фотография")
     return photos
@@ -603,6 +614,37 @@ def catalog_products(api, catalog):
     return {item["slug"]: item for item in api.pages(f"{CATALOGS}/{catalog['id']}", "products")}
 
 
+def update_product_photos(api, journal, products, catalogs):
+    work = []
+    memberships = {key: catalog_products(api, catalogs[key]) for key in sorted({item.catalog for item in products})}
+    for product in products:
+        placement = memberships[product.catalog].get(product.slug)
+        product_id = journal.products.get(product.slug)
+        if not product_id or not placement or placement["id"] != product_id:
+            raise ImportFailure(f"{product.slug}: в коллекции нет карточки из журнала импорта")
+        route = f"{PRODUCTS}/{product_id}"
+        current = product_body(api.call(route))
+        known_ids = [journal.images.get(item.digest) for item in product.photos]
+        current_ids = [item["id"] for item in current["images"]]
+        if not set(current_ids) <= set(known_ids):
+            raise ImportFailure(f"{product.slug}: в карточке есть фото, отсутствующие в пакете и журнале")
+        work.append((product, route, current))
+
+    for product, route, current in work:
+        wanted = product.with_images([journal.image_id(api, item) for item in product.photos])["images"]
+        if current["images"] != wanted:
+            if product_body(api.call(route)) != current:
+                raise ImportFailure(f"{product.slug}: карточка изменилась во время проверки")
+            expected = dict(current, images=wanted)
+            if product_body(api.call(route, "PUT", expected)) != expected:
+                raise ImportFailure(f"{product.slug}: сервер сохранил другой порядок фотографий")
+        if current["published"] and catalogs[product.catalog]["published"]:
+            saved = api.call(f"/api/catalogs/{product.catalog}/products/{product.slug}")
+            if product_body(saved)["images"] != wanted:
+                raise ImportFailure(f"{product.slug}: порядок фото на витрине отличается от пакета")
+        print(f"Фото сверены: {product.slug}, {len(wanted)} шт.", flush=True)
+
+
 def publish_products(api, journal, products, catalogs):
     memberships = {key: catalog_products(api, catalogs[key]) for key in sorted({item.catalog for item in products})}
     work = []
@@ -676,7 +718,7 @@ def import_gallery(api, journal, examples):
 
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("check", "import", "publish", "gallery"))
+    parser.add_argument("operation", choices=("check", "import", "publish", "photos", "gallery"))
     parser.add_argument("--workbook", type=Path, required=True, help="путь к заполненному XLSX")
     parser.add_argument("--photos", type=Path, required=True, help="путь к папке photos распакованного пакета")
     parser.add_argument("--url", help="HTTPS-адрес Shop")
@@ -714,6 +756,9 @@ def run(args):
         targets = {item.catalog for item in products}
         if missing := targets - catalogs.keys():
             raise ImportFailure(f"Коллекции отсутствуют на сервере: {', '.join(sorted(missing))}")
+        if args.operation == "photos":
+            update_product_photos(api, journal, products, catalogs)
+            return
         unpublished = {item.catalog for item in to_publish if not catalogs[item.catalog]["published"]}
         if unpublished:
             raise ImportFailure(f"Сначала опубликуйте коллекции: {', '.join(sorted(unpublished))}")

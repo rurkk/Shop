@@ -1,12 +1,13 @@
 ФОТО ДЛЯ КАРТОЧЕК SHOP
 
-В каждой папке 01-cover.jpg — обложка. 02-detail.jpg — вышивка крупным планом.
-Файлы 03-* и далее — дополнительные ракурсы. Названия в списке служат для навигации по фото.
+Если у карточки есть студийная визуализация, она стоит первой (01-studio.jpg), прежняя обложка второй (02-original.jpg), крупный план третьим (03-detail.jpg).
+В папках без визуализаций 01-cover.jpg — обложка, 02-detail.jpg — крупный план. Файлы с пометкой alternate содержат дополнительные ракурсы.
 Все файлы квадратные, JPEG в sRGB. Кадры из Reels экспортированы в 800 × 800, исходные фото — в 1200 × 1200.
 Кадры из Reels увеличены при экспорте. Фактура ткани на них мягче, особенно в крупном плане.
 В некоторых публикациях изделие видно частично. Описание комплекта указывает, какой ракурс доступен.
 Серый фон четырёх обложек создан в ImageGen и смонтирован с фото. Рисунок вышивки взят из источника.
 Для фона в ImageGen использован запрос о пустой студии, бесшовной тёпло-серой матовой бумаге и мягком свете сверху слева.
+Восемь новых обложек «Руси» сделаны встроенным ImageGen по исходным фотографиям. Общий запрос — квадратный кадр сверху, вещь сложена рукавами внутрь, матовый бежево-серый фон и мягкий свет из окна слева. Сохранить цвет изделия, размер, сторону, рисунок и надписи вышивки. Для комплекта обе футболки в кадре, для вышивки на спине вид со спины. См. исходники вторым фото.
 
 Промпт для встроенного ImageGen
 Use case: product-mockup. Asset type: square clothing catalog photo backdrop, to be composited behind an original photograph of an ivory embroidered hoodie. A perfectly empty small e-commerce studio with a continuous seamless matte warm light-gray photographic paper sweep, front-on camera, diffuse soft box light from the upper left. Restrained neutral ivory-gray palette around #EAE7E1, extremely gentle natural falloff, nearly flat in the center. No horizon seam or corners. No objects, lettering, plants, gradients with banding, fabric, texture effects or marks of any sort. Render a real photographic background, square.
@@ -14,9 +15,10 @@ Use case: product-mockup. Asset type: square clothing catalog photo backdrop, to
 РУСЬ
 
 rus/01-hooligans — Худи «Хулиганз»
-Худи на раскладке и вышивка под другим углом.
-  01-cover.jpg  |  https://www.instagram.com/rus_factory/p/DTTIbrhjZg4/  |  фото Instagram
-  02-detail.jpg  |  https://www.instagram.com/rus_factory/p/DTTIbrhjZg4/  |  фото Instagram
+Худи на раскладке со спины и вышивка под другим углом.
+  01-studio.jpg    |  https://www.instagram.com/rus_factory/p/DTTIbrhjZg4/  |  студийная визуализация ImageGen
+  02-original.jpg  |  https://www.instagram.com/rus_factory/p/DTTIbrhjZg4/  |  фото Instagram
+  03-detail.jpg    |  https://www.instagram.com/rus_factory/p/DTTIbrhjZg4/  |  фото Instagram
 
 rus/02-durakam-vezet — Худи «Дуракам везёт»
 Худи на раскладке и надпись крупным планом.
@@ -25,19 +27,22 @@ rus/02-durakam-vezet — Худи «Дуракам везёт»
 
 rus/03-porsh — Чёрное худи «Порш»
 Вышивка на спине. Три исходных ракурса на человеке.
-  01-cover.jpg  |  https://www.instagram.com/rus_factory/p/DfnZIcckZVF/  |  фото Instagram
-  02-detail.jpg  |  https://www.instagram.com/rus_factory/p/DfnZIcckZVF/  |  фото Instagram
-  03-alternate.jpg  |  https://www.instagram.com/rus_factory/p/DfnZIcckZVF/  |  фото Instagram
+  01-studio.jpg    |  https://www.instagram.com/rus_factory/p/DfnZIcckZVF/  |  студийная визуализация ImageGen
+  02-original.jpg  |  https://www.instagram.com/rus_factory/p/DfnZIcckZVF/  |  фото Instagram
+  03-detail.jpg    |  https://www.instagram.com/rus_factory/p/DfnZIcckZVF/  |  фото Instagram
+  04-alternate.jpg |  https://www.instagram.com/rus_factory/p/DfnZIcckZVF/  |  фото Instagram
 
 rus/04-prosba — Светлая футболка «Просьба»
-Горловина и вышивка. Общего фото изделия целиком нет.
-  01-cover.jpg  |  https://www.instagram.com/rus_factory/p/DYm9VpdDXLo/  |  фото Instagram
-  02-detail.jpg  |  https://www.instagram.com/rus_factory/p/DYm9VpdDXLo/  |  фото Instagram
+В исходном фото видны горловина и вышивка. На визуализации рукава сложены внутрь.
+  01-studio.jpg    |  https://www.instagram.com/rus_factory/p/DYm9VpdDXLo/  |  студийная визуализация ImageGen
+  02-original.jpg  |  https://www.instagram.com/rus_factory/p/DYm9VpdDXLo/  |  фото Instagram
+  03-detail.jpg    |  https://www.instagram.com/rus_factory/p/DYm9VpdDXLo/  |  фото Instagram
 
 rus/05-kon — Светлая футболка «Конь»
 Раскладка и крупный план из Reels.
-  01-cover.jpg  |  https://www.instagram.com/rus_factory/reel/DTTGb4gjft1/  |  кадр Reels
-  02-detail.jpg  |  https://www.instagram.com/rus_factory/reel/DTTGb4gjft1/  |  кадр Reels
+  01-studio.jpg    |  https://www.instagram.com/rus_factory/reel/DTTGb4gjft1/  |  студийная визуализация ImageGen
+  02-original.jpg  |  https://www.instagram.com/rus_factory/reel/DTTGb4gjft1/  |  кадр Reels
+  03-detail.jpg    |  https://www.instagram.com/rus_factory/reel/DTTGb4gjft1/  |  кадр Reels
 
 rus/06-volk — Чёрное изделие «Волк»
 В кадре вырез и передняя часть изделия.
@@ -46,24 +51,28 @@ rus/06-volk — Чёрное изделие «Волк»
 
 rus/07-ya-ne-odna — Светлое худи «Я не одна»
 Вид спереди на манекене и крупный план вышивки из другого кадра.
-  01-cover.jpg  |  https://www.instagram.com/rus_factory/reel/De8hrglT1Iy/  |  кадр Reels
-  02-detail.jpg  |  https://www.instagram.com/rus_factory/reel/De8hrglT1Iy/  |  кадр Reels
+  01-studio.jpg    |  https://www.instagram.com/rus_factory/reel/De8hrglT1Iy/  |  студийная визуализация ImageGen
+  02-original.jpg  |  https://www.instagram.com/rus_factory/reel/De8hrglT1Iy/  |  кадр Reels
+  03-detail.jpg    |  https://www.instagram.com/rus_factory/reel/De8hrglT1Iy/  |  кадр Reels
 
 rus/08-lyubava-i-alyosha — Парные футболки «Любава» и «Алёша»
 Фотографии парной композиции и двух мотивов.
-  01-cover.jpg  |  https://www.instagram.com/rus_factory/reel/DdxDyAetdN7/  |  кадр Reels
-  02-detail.jpg  |  https://www.instagram.com/rus_factory/reel/DdxDyAetdN7/  |  кадр Reels
-  03-alternate.jpg  |  https://www.instagram.com/rus_factory/reel/DdxDyAetdN7/  |  кадр Reels
+  01-studio.jpg    |  https://www.instagram.com/rus_factory/reel/DdxDyAetdN7/  |  студийная визуализация ImageGen
+  02-original.jpg  |  https://www.instagram.com/rus_factory/reel/DdxDyAetdN7/  |  кадр Reels
+  03-detail.jpg    |  https://www.instagram.com/rus_factory/reel/DdxDyAetdN7/  |  кадр Reels
+  04-alternate.jpg |  https://www.instagram.com/rus_factory/reel/DdxDyAetdN7/  |  кадр Reels
 
 rus/09-parnye-futbolki — Тёмно-синяя и светлая парные футболки
 Два изделия в одной раскладке и фрагмент с вышивкой.
-  01-cover.jpg  |  https://www.instagram.com/rus_factory/reel/De8C3fEIGg7/  |  кадр Reels
-  02-detail.jpg  |  https://www.instagram.com/rus_factory/reel/De8C3fEIGg7/  |  кадр Reels
+  01-studio.jpg    |  https://www.instagram.com/rus_factory/reel/De8C3fEIGg7/  |  студийная визуализация ImageGen
+  02-original.jpg  |  https://www.instagram.com/rus_factory/reel/De8C3fEIGg7/  |  кадр Reels
+  03-detail.jpg    |  https://www.instagram.com/rus_factory/reel/De8C3fEIGg7/  |  кадр Reels
 
 rus/10-landshaftny-dizayner — Тёмное худи «Ландшафтный дизайнер»
 Капюшон и вышивка в раскладке.
-  01-cover.jpg  |  https://www.instagram.com/rus_factory/reel/DfTJbnLIM3F/  |  кадр Reels
-  02-detail.jpg  |  https://www.instagram.com/rus_factory/reel/DfTJbnLIM3F/  |  кадр Reels
+  01-studio.jpg    |  https://www.instagram.com/rus_factory/reel/DfTJbnLIM3F/  |  студийная визуализация ImageGen
+  02-original.jpg  |  https://www.instagram.com/rus_factory/reel/DfTJbnLIM3F/  |  кадр Reels
+  03-detail.jpg    |  https://www.instagram.com/rus_factory/reel/DfTJbnLIM3F/  |  кадр Reels
 
 ЛОШАДИ И ПИТОМЦЫ
 
@@ -185,6 +194,41 @@ automotive/10-subaru — Оливковое худи с Subaru
 Капюшон в раскладке, вышитые авто и эмблема.
   01-cover.jpg  |  https://www.instagram.com/natezzzda/reel/DfVPXXXN2qn/  |  кадр Reels
   02-detail.jpg  |  https://www.instagram.com/natezzzda/reel/DfVPXXXN2qn/  |  кадр Reels
+
+ПРОМПТЫ СТУДИЙНЫХ ОБЛОЖЕК
+
+ImageGen, общий запрос для одной вещи
+Use case: compositing; final asset: a single square 1:1 cover photo for an online catalog. Image 1 is the actual product, image 2 is embroidery fidelity, image 3 is the studio photography/framing reference. Build a photorealistic directly overhead flat lay of the exact real garment, folded neatly with sleeves tucked behind, all outer folded edges inside the square, centered upright, garment approximately 76% of frame width and 86% of frame height. Use the style reference's matte warm beige-gray stone/paper surface and subtle soft window light from upper left with a shallow grounding shadow. Copy only the camera, backdrop and lighting from image 3. Match product color, seams, hood/neck construction and embroidery size, position, colors, stitch shapes and lettering from images 1 and 2. Transfer the exact embroidered artwork rather than styling or redrawing it. Artwork sits on the original side of the garment, at original size, not a tiny chest logo. Single image without borders, UI, watermark, decorative objects or extra markings.
+
+Дополнения для отдельных моделей
+01-hooligans
+Subject: warm ivory hoodie, folded with its back facing the camera, flat outer hood visible above the artwork and swept upward to leave all of the artwork visible. No front opening, drawstrings, front pocket or front seam on this back view. Directly below the hood, reproduce the original large lettering «РАША ХУЛИГАНЗ» in narrow deep red, with the same three embroidered cartoon people holding a white flag with a red cross, and the same small motifs on the flag. Keep the fine visual details from Image 2. Keep white, black, red and beige stitch colors natural, centered at the photographed scale.
+
+05-kon
+Subject: warm milky ivory crew-neck short sleeve T-shirt. Preserve the original embroidery at center chest, a single row of muted red Cyrillic text «ДА ЕБИСЬ ОНО КОНЁМ» exactly, with the same cartoon brown, red and black rearing horse below the text. Image 2 is the embroidery source; trace the original silhouette and stitching including the unusual horse proportions and stitch colors. Image 1 has a separate video overlay above the garment on the carpet: exclude the overlay. Straighten the embroidery together with the T-shirt; keep the actual relative size.
+
+07-ya-ne-odna
+Subject: milk ivory hoodie shown from the front. Faithfully fold the photographed hood with its crossover neckline, without cord, hardware or mannequin. Keep the olive green figure as photographed from the back, with original black silhouette details and no added graphics. Preserve embroidery position and exact black lettering as in Image 2: «Я НЕ ОДНА» above the figure and the two lines «ОН ПРОСТО» / «НЕМНОГО ЗАНЯТ» beneath it. Look at the original sewn glyphs. Exclude the red heart video overlay from Image 1.
+
+10-landshaftny-dizayner
+Subject: very dark navy hoodie (subtle blue, exactly as Image 1), back facing the camera, outer hood folded upward as in the product. Preserve the exact large centered embroidery: red text «ЛАНДШАФТНЫЙ» above and «ДИЗАЙНЕР» below, the same central ivory and gray figure with two red aircraft shapes as in the detailed actual artwork. Keep both text lines, use the photographed Cyrillic letters as the source. Maintain the original embroidery, no modification of the motif. No apparent drawstrings, openings or details from the front on the back-facing view.
+
+03-porsh
+
+
+04-prosba
+
+
+ImageGen, общий запрос для комплектов
+Use case: compositing; final asset: one full-bleed 1:1 catalog photo, directly overhead. Image 1 is the real two-shirt product, images between first and last are exact stitched motif details, and last image provides only composition principles, window light and background. Set out the actual two folded crew-neck tees side by side, close together, different subtle vertical offsets so both original designs are legible at tile size. Both full folded silhouettes visible, one photographed scene with no split lines. Preserve collars, colors, lettering and motifs, reproduce actual embroidery stitch for stitch, preserving the specific faces, expressions and silhouette. Pale warm gray matte surface, soft shaded window light from upper left, no labels, caption overlays, hands or props.
+
+Дополнения для комплектов
+08-lyubava-i-alyosha
+The folded tee on the left is black with a stern yellow-haired knight with wide gray shoulders and red/gold neckline. Right is white with a blue-eyed girl and a red scarf with orange dots. Preserve all faces and the exact deep red embroidered text at the bottom of each motif. On black «− ИЗВИНИ, ДОРОГАЯ, СЛУЖБА». On white «− НЕ ПУЩУ!». Image 2 gives white shirt motif and Image 3 gives black shirt motif. Do not use the little rosette from the studio reference.
+
+09-parnye-futbolki
+The folded tee on the left is very dark ultramarine navy with a brown-haired, brown-bearded stern knight wearing ivory and gray. The right tee is milk white with a long orange-haired blue-eyed woman in a red top and narrow red headband. Preserve original exact faces and burgundy embroidered captions, navy «− ИЗВИНИ, ДОРОГАЯ, СЛУЖБА», ivory «− НЕ ПУЩУ!». Do not use the little rosette from the studio reference.
+
 
 automotive/11-red-bmw — Чёрное худи с красным BMW
 Капюшон в раскладке, вышитые авто и эмблема.
