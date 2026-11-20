@@ -10,7 +10,9 @@ import styles from "./admin-order.module.css";
 
 type Job = { status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED"; failure: string | null };
 type Draft = { fileId: string; interpretation: string | null; published: boolean };
-type Workspace = { available: boolean; latestJob: Job | null; drafts: Draft[] };
+type Side = "FRONT" | "BACK";
+type PanelEstimate = { panelWidthMm: number; panelHeightMm: number; foldedWidthMm: number; foldedHeightMm: number };
+type Workspace = { available: boolean; latestJob: Job | null; drafts: Draft[]; panelEstimates: Partial<Record<Side, PanelEstimate>> };
 
 function isActive(job: Job | null | undefined) {
   return job?.status === "QUEUED" || job?.status === "RUNNING";
@@ -34,6 +36,9 @@ export function AdminSketchGeneration({ order, path, publishedFileId, busy, onPu
   const [preview, setPreview] = useState<{ draft: Draft; title: string; publish: boolean }>();
   const [published, setPublished] = useState<string>();
   const [generationFor, setGenerationFor] = useState<string>();
+  const [side, setSide] = useState<Side | "">("");
+  const [panelWidth, setPanelWidth] = useState("");
+  const [panelHeight, setPanelHeight] = useState("");
   const generationStatus = useRef<HTMLDivElement>(null);
   const revisionInput = useRef<HTMLTextAreaElement>(null);
   const revisionTrigger = useRef<HTMLButtonElement>(null);
@@ -73,6 +78,7 @@ export function AdminSketchGeneration({ order, path, publishedFileId, busy, onPu
   const latestJob = workspace?.latestJob;
   const active = isActive(latestJob) && workspace?.available;
   const frameMm = order.embroidery ? embroideryFrameSizeMm[order.embroidery.frame] : undefined;
+  const estimate = side ? workspace?.panelEstimates[side] : undefined;
   const canGenerate = workspace?.available && frameMm !== undefined;
   const cannotStart = !canGenerate || busy || generationTask.busy || active || Boolean(loadError);
   const start = (event: FormEvent<HTMLFormElement>, previousFileId?: string) => {
@@ -81,7 +87,7 @@ export function AdminSketchGeneration({ order, path, publishedFileId, busy, onPu
     if (!placementForm.current?.reportValidity()) return;
     const data = new FormData(placementForm.current);
     const placement = {
-      side: data.get("side"),
+      side,
       panelWidthMm: millimetersInput(data, "panelWidth"),
       panelHeightMm: millimetersInput(data, "panelHeight"),
       embroideryWidthMm: millimetersInput(data, "embroideryWidth"),
@@ -126,19 +132,30 @@ export function AdminSketchGeneration({ order, path, publishedFileId, busy, onPu
       {canGenerate ? <form ref={placementForm} className={styles.generation} onSubmit={start}>
           <fieldset className={styles.placement} disabled={cannotStart}>
             <legend>Размещение вышивки</legend>
-            <p className="muted">Измерьте участок ткани на сложенном изделии. Эскиз разместится в центре этой зоны.</p>
+            <p className="muted">Эскиз разместится в центре выбранной стороны. Для точного масштаба укажите замеры плоского участка ткани.</p>
             <label className={`field ${styles.garmentSide}`}>Сторона изделия
               <span className={styles.selectControl}>
-                <select name="side" defaultValue="" required>
+                <select name="side" value={side} required onChange={(event) => {
+                  setSide(event.target.value as Side | "");
+                  setPanelWidth("");
+                  setPanelHeight("");
+                }}>
                   <option value="" disabled>Выберите сторону</option>
                   <option value="FRONT">Перед</option><option value="BACK">Спинка</option>
                 </select>
               </span>
             </label>
+            {estimate && <div>
+              <p className="muted">Сложенное изделие M ≈ {estimate.foldedWidthMm / 10} × {estimate.foldedHeightMm / 10} см.</p>
+              <button type="button" className="button outline" onClick={() => {
+                setPanelWidth(String(estimate.panelWidthMm / 10));
+                setPanelHeight(String(estimate.panelHeightMm / 10));
+              }}>Подставить оценку панели для M</button>
+            </div>}
             <div className={styles.measurements}>
               <div className={styles.measurementPair}>
-                <Measurement name="panelWidth" label="Ширина панели, см" />
-                <Measurement name="panelHeight" label="Высота панели, см" />
+                <Measurement name="panelWidth" label="Ширина панели, см" value={panelWidth} onChange={setPanelWidth} />
+                <Measurement name="panelHeight" label="Высота панели, см" value={panelHeight} onChange={setPanelHeight} />
               </div>
               <div className={styles.measurementPair}>
                 <Measurement name="embroideryWidth" label="Ширина вышивки, см" mm={frameMm} maxMm={frameMm} />
@@ -218,9 +235,12 @@ export function AdminSketchGeneration({ order, path, publishedFileId, busy, onPu
   </section>;
 }
 
-function Measurement({ name, label, mm, maxMm = 9999 }: { name: string; label: string; mm?: number; maxMm?: number }) {
+function Measurement({ name, label, mm, maxMm = 9999, value, onChange }: {
+  name: string; label: string; mm?: number; maxMm?: number; value?: string; onChange?: (value: string) => void;
+}) {
   return <label className="field">{label}
-    <input name={name} type="number" min="0.1" max={maxMm / 10} step="0.1" defaultValue={mm === undefined ? undefined : mm / 10} required />
+    <input name={name} type="number" min="0.1" max={maxMm / 10} step="0.1" value={value}
+      defaultValue={mm === undefined ? undefined : mm / 10} onChange={onChange ? (event) => onChange(event.target.value) : undefined} required />
   </label>;
 }
 

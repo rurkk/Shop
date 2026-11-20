@@ -878,7 +878,12 @@ def main():
     buyer.call(order + "/messages", "POST", {
         "clientMessageId": str(uuid.uuid4()), "body": f"Для эскиза оставьте контур, связь: {buyer_email}",
     })
-    assert staff.call(sketch_generation) == {"available": True, "latestJob": None, "drafts": []}
+    workspace = staff.call(sketch_generation)
+    assert workspace["available"] and workspace["latestJob"] is None and workspace["drafts"] == []
+    assert set(workspace["panelEstimates"]) == {"FRONT", "BACK"}
+    for estimate in workspace["panelEstimates"].values():
+        assert 0 < estimate["panelWidthMm"] <= estimate["foldedWidthMm"]
+        assert 0 < estimate["panelHeightMm"] <= estimate["foldedHeightMm"]
     model_settings = "/api/staff/sketch-settings"
     original_models = staff.call(model_settings)["selection"]
     initial_models = dict(original_models, responseModel="gemini-2-5-flash-lite", imageModel="flash")

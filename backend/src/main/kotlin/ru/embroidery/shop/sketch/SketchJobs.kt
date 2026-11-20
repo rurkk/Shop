@@ -39,6 +39,7 @@ internal data class SketchWorkspace(
     val available: Boolean,
     val latestJob: SketchJobSummary?,
     val drafts: List<SketchDraft>,
+    val panelEstimates: Map<GarmentSide, SketchPanelEstimate>,
 )
 
 internal data class ClaimedSketchJob(

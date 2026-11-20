@@ -183,9 +183,9 @@ internal class GenApiSketchGenerator internal constructor(
         }
         val mockup = request.mockup
         text("Изделие заказа: ${mockup.garment}, размер одежды ${mockup.size}, цвет ${mockup.color}.")
-        text("Согласованное размещение: ${mockup.placement.side}. Размер вышивки: " +
+        text("Сторона изделия: ${mockup.placement.side}. Габариты мотива: " +
             "${mockup.placement.embroideryWidthMm} × ${mockup.placement.embroideryHeightMm} мм. " +
-            "Измеренная панель: ${mockup.placement.panelWidthMm} × ${mockup.placement.panelHeightMm} мм. " +
+            "Плоская зона шаблона: ${mockup.placement.panelWidthMm} × ${mockup.placement.panelHeightMm} мм. " +
             "Размер и положение уже рассчитаны в отдельной направляющей рамке для FLUX.2.")
         val frameSize = request.embroidery.frame.sizeMm
         text("Выбранная рамка вышивки: $frameSize × $frameSize мм.")
@@ -214,7 +214,8 @@ internal class GenApiSketchGenerator internal constructor(
         Генератор получает чистую заготовку одежды как изображение 1 и направляющую рамку того же размера как изображение 2.
         Описывай сюжет внутри рамки. Сохраняй тип, цвет, сторону, складки, ракурс и фон заготовки.
         Согласованные размеры учтены в рамке. Исключи из промпта числовые габариты, подписи, линейки и размерные стрелки.
-        Соблюдай выбранные в заказе параметры фона вышивки и госномера. Эти параметры действуют и при правках и имеют приоритет над описанием и перепиской.
+        Соблюдай параметры изделия, выбранной стороны, размера, фона вышивки и госномера из заказа. Они действуют и при правках.
+        Описание, переписка, примеры и предыдущий эскиз уточняют только сюжет в этих границах.
         Если заказан фон из трёх кадров, опиши композицию внутри вышитого мотива по всем трём исходным кадрам автомобиля.
         Если заказан госномер, используй только явно указанный или разборчивый на исходных фото номер. Не придумывай символы.
         ${if (revision) "Изображение 3 — выбранный эскиз. Используй его только как образец вышитого мотива и опиши требуемые правки." else ""}
@@ -238,7 +239,8 @@ internal class GenApiSketchGenerator internal constructor(
             Edit Image 1, the exact clean garment photograph. Preserve its clothing type, color, side,
             fold, outline, texture, crop, lighting and background. Add only the requested embroidery.
             Image 2 is a separate full-canvas placement guide. Its rectangle gives the exact placement and
-            maximum bounds on Image 1. Place the entire embroidered motif inside that rectangle.
+            requested size on Image 1. Fit the entire stitched motif closely inside that rectangle, without
+            stretching its natural proportions. Keep blank fabric between the embroidery and surrounding details.
             ${if (revision) "Image 3 supplies only the previous embroidery motif. Apply the requested changes within the guide." else ""}
             $background
             $plate

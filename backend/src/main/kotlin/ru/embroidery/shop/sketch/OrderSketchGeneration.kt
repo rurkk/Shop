@@ -57,8 +57,9 @@ internal class OrderSketchGeneration(
 
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     fun workspace(orderId: UUID): SketchWorkspace {
-        orders.get(orderId).requireType(OrderType.CUSTOM_PHOTO)
-        return SketchWorkspace(generators.ifAvailable != null, jobs.latest(orderId), jobs.drafts(orderId))
+        val order = orders.get(orderId)
+        order.requireType(OrderType.CUSTOM_PHOTO)
+        return SketchWorkspace(generators.ifAvailable != null, jobs.latest(orderId), jobs.drafts(orderId), templates.estimates(order))
     }
 
     @Transactional

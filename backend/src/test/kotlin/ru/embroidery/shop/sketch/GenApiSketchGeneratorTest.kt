@@ -49,7 +49,7 @@ class GenApiSketchGeneratorTest {
                         "Примеры команды для эскиза:", "Файл-пример: threads.txt", "Use green cotton",
                         "Файл-пример: palette.png", "data:image/png;base64,Bg==", "Данные текущего заказа:",
                         "Изделие заказа: HOODIE, размер одежды M, цвет Чёрный.",
-                        "Согласованное размещение: FRONT. Размер вышивки: 160 × 160 мм. Измеренная панель: 500 × 500 мм. " +
+                        "Сторона изделия: FRONT. Габариты мотива: 160 × 160 мм. Плоская зона шаблона: 500 × 500 мм. " +
                             "Размер и положение уже рассчитаны в отдельной направляющей рамке для FLUX.2.",
                         "Выбранная рамка вышивки: 160 × 160 мм.",
                         "Фон вышивки: без отдельной фоновой композиции.",
@@ -72,6 +72,10 @@ class GenApiSketchGeneratorTest {
                     val prompt = body.path("prompt").stringValue()
                     assertTrue(prompt.contains("Omit any car registration plate lettering"))
                     assertTrue(prompt.contains("without adding a separate background composition"))
+                    assertTrue(prompt.contains("Image 3 supplies only the previous embroidery motif"))
+                    assertTrue(prompt.contains("No frames, measurement markings"))
+                    assertEquals(1024, body.path("width").intValue())
+                    assertEquals(1024, body.path("height").intValue())
                     prompts += prompt.split("\n\n")[1]
                     """{"request_id":${++jobId}}""".toByteArray()
                 }

@@ -95,8 +95,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       ? (await response.json() as { detail?: string }).detail : undefined;
     throw new ApiError(response.status, detail);
   }
-  if (response.status === 202 || response.status === 204) return undefined as T;
-  if (!response.headers.get("content-type")?.includes("json")) throw new Error("Сервер вернул неожиданный ответ.");
+  const isJson = response.headers.get("content-type")?.includes("json");
+  if (response.status === 204 || (response.status === 202 && !isJson)) return undefined as T;
+  if (!isJson) throw new Error("Сервер вернул неожиданный ответ.");
   return response.json() as Promise<T>;
 }
 
