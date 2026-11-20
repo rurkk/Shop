@@ -24,8 +24,6 @@ internal data class SketchGenerationRequest(
     val maxVariants: Int = 1,
     val revision: SketchRevision? = null,
 ) {
-    val backdrop by lazy { SketchBackdrop.choose(sourcePhotos) }
-
     init {
         require(sourcePhotos.isNotEmpty()) { "At least one source photo is required" }
         require(!embroidery.threePhotoBackground || sourcePhotos.size == BACKGROUND_PHOTO_COUNT) {

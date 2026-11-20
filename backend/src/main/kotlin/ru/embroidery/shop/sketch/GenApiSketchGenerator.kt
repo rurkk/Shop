@@ -48,9 +48,8 @@ internal class GenApiSketchGenerator internal constructor(
     override fun generate(request: SketchGenerationRequest): List<SketchVariant> {
         val configuration = currentConfiguration()
         val references = buildList {
-            add(request.mockup.template)
-            request.revision?.let { add(it.previousSketch) }
             addAll(request.sourcePhotos)
+            request.revision?.let { add(it.previousSketch) }
         }.map(::dataUri)
         val prompts = plan(request, configuration)
         val ids = prompts.map { prompt ->
@@ -64,14 +63,29 @@ internal class GenApiSketchGenerator internal constructor(
                 "output_format" to "png",
                 "enable_safety_checker" to true,
             ))
-            val id = response.path("request_id")
-            if (!id.isIntegralNumber || !id.canConvertToLong() || id.longValue() <= 0) {
-                throw SketchGenerationException("GenAPI omitted the generation ID")
-            }
-            id.longValue()
+            generationId(response)
         }
         val deadline = System.nanoTime() + Duration.ofMinutes(6).toNanos()
-        return ids.map { awaitImage(it, deadline) }
+        return ids.map { id ->
+            val artwork = awaitImageUrl(id, deadline)
+            val extraction = post(apiHost, "/api/v1/functions/remove-background", mapOf(
+                "implementation" to "birefnet", "image" to artwork.toASCIIString(),
+            ))
+            val isolated = awaitImageUrl(generationId(extraction), deadline)
+            val image = read(client.get().uri(isolated), MAX_IMAGE_BYTES.toInt())
+            if (!image.take(PNG_SIGNATURE.size).toByteArray().contentEquals(PNG_SIGNATURE)) {
+                throw SketchGenerationException("GenAPI did not return a PNG motif")
+            }
+            SketchVariant(SketchImage("image/png", image))
+        }
+    }
+
+    private fun generationId(response: JsonNode): Long {
+        val id = response.path("request_id")
+        if (!id.isIntegralNumber || !id.canConvertToLong() || id.longValue() <= 0) {
+            throw SketchGenerationException("GenAPI omitted the generation ID")
+        }
+        return id.longValue()
     }
 
     private fun plan(request: SketchGenerationRequest, configuration: SketchConfiguration): List<String> {
@@ -99,23 +113,19 @@ internal class GenApiSketchGenerator internal constructor(
         }.toList()
     }
 
-    private fun awaitImage(id: Long, deadline: Long): SketchVariant {
+    private fun awaitImageUrl(id: Long, deadline: Long): URI {
         while (System.nanoTime() - deadline < 0) {
             val response = parseJson(read(client.get().uri("$apiHost/api/v1/request/get/$id")
                 .headers { it.setBearerAuth(settings.apiKey) }, MAX_JSON_BYTES))
             when (response.path("status").stringValue(null)) {
-                "processing" -> pause()
+                "starting", "processing" -> pause()
                 "success" -> {
                     val result = response.path("result")
                     val url = result.path(0).stringValue(null)
                     if (!result.isArray || result.size() != 1 || url.isNullOrBlank()) {
                         throw SketchGenerationException("GenAPI did not return exactly one image")
                     }
-                    val image = read(client.get().uri(imageUri(url)), MAX_IMAGE_BYTES.toInt())
-                    if (!image.take(PNG_SIGNATURE.size).toByteArray().contentEquals(PNG_SIGNATURE)) {
-                        throw SketchGenerationException("GenAPI did not return a PNG image")
-                    }
-                    return SketchVariant(SketchImage("image/png", image))
+                    return imageUri(url)
                 }
                 else -> throw SketchGenerationException("GenAPI image generation failed")
             }
@@ -233,7 +243,7 @@ internal class GenApiSketchGenerator internal constructor(
 
     private fun imageInstructions(prompt: String, request: SketchGenerationRequest): String {
         val revision = request.revision != null
-        val sourceImages = if (revision) "Images 3 onward" else "Images 2 onward"
+        val sourceImages = if (request.sourcePhotos.size == 1) "Image 1" else "Images 1–${request.sourcePhotos.size}"
         val background = if (request.embroidery.threePhotoBackground) {
             "$sourceImages are the three source photos. Compose the embroidered background from all three reference frames of the car, within the embroidery only."
         } else {
@@ -245,13 +255,12 @@ internal class GenApiSketchGenerator internal constructor(
             "Omit any car registration plate lettering, even if it appears in the references."
         }
         return """
-            Render only the isolated machine-embroidered motif. Use Image 1 as a reference for thread color contrast.
+            Render one isolated machine-embroidered motif using the reference subject in $sourceImages.
             Show real thread texture, small directional stitches and clean stitched edges. Never show the garment,
             fabric, garment folds, hoop, border, outline rectangle, patch backing or drop shadow around the motif.
-            Put every stitch on a perfectly flat ${request.backdrop.description} background, including
-            any open spaces between elements. Leave wide uninterrupted bands of the same color on all four edges.
-            Use that color exclusively for the background. Keep the entire motif in the image, with no crop.
-            ${if (revision) "Image 2 supplies only the previous embroidery motif. Apply the requested changes to that motif." else ""}
+            Place it on a flat solid light-gray background, including any open spaces between stitched elements.
+            Leave clear margins on every edge so the motif can be separated cleanly from the background.
+            ${if (revision) "The last image supplies only the previous embroidery motif. Apply the requested changes to that motif." else ""}
             $background
             $plate
             ${if (request.embroidery.frame == EmbroideryFrame.MINI) "Use a clear silhouette and only details readable in miniature embroidery." else ""}
@@ -259,7 +268,7 @@ internal class GenApiSketchGenerator internal constructor(
 
             $prompt
 
-            Return the isolated thread motif on the specified solid color. The guide must never appear in the result.
+            Return the isolated thread motif on a solid light-gray background. The guide must never appear in the result.
             No frames, measurement markings, rulers, labels or annotation overlays.
             The only permitted lettering is explicitly requested embroidery inside the motif.
         """.trimIndent()

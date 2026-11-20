@@ -106,7 +106,7 @@ internal class OrderSketchGeneration(
             val request = buildRequest(actor, job)
             val variants = generator.generate(request)
             if (variants.size !in 1..job.maxVariants) throw SketchGenerationException("Invalid number of variants")
-            saveVariants(actor, job, variants.map { it.copy(image = request.mockup.place(it.image, request.backdrop)) })
+            saveVariants(actor, job, variants.map { it.copy(image = request.mockup.place(it.image)) })
         } catch (_: SketchContextTooLarge) {
             jobs.fail(job.id, "CONTEXT_TOO_LARGE")
         } catch (_: SketchGenApiLimitReached) {

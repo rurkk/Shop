@@ -73,27 +73,25 @@ class SketchGarmentTemplatesTest {
     fun `isolated stitches fit the frame and preserve the garment pixels and aspect ratio`() {
         val placement = SketchPlacement(GarmentSide.FRONT, 360, 325, 140, 100, SketchPosition.CENTER)
         val mockup = templates.prepare(order, placement)
-        val chroma = BufferedImage(32, 32, BufferedImage.TYPE_INT_RGB)
-        val graphics = chroma.createGraphics()
-        graphics.color = Color.MAGENTA
-        graphics.fillRect(0, 0, 32, 32)
+        val isolated = BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB)
+        val graphics = isolated.createGraphics()
         graphics.color = Color.ORANGE
         graphics.fillRect(4, 10, 24, 12)
         graphics.dispose()
         fun encoded(): SketchImage {
             val bytes = ByteArrayOutputStream()
-            ImageIO.write(chroma, "png", bytes)
+            ImageIO.write(isolated, "png", bytes)
             return SketchImage("image/png", bytes.toByteArray())
         }
         val original = ImageIO.read(mockup.template.bytes.inputStream())
-        val result = ImageIO.read(mockup.place(encoded(), SketchBackdrop.MAGENTA).bytes.inputStream())
+        val result = ImageIO.read(mockup.place(encoded()).bytes.inputStream())
         assertEquals(Color.ORANGE.rgb, result.getRGB(413, 541))
         assertEquals(Color.ORANGE.rgb, result.getRGB(596, 632))
         for ((x, y) in listOf(412 to 587, 597 to 587, 504 to 540, 504 to 633)) {
             assertEquals(original.getRGB(x, y), result.getRGB(x, y))
         }
 
-        chroma.setRGB(0, 0, Color.ORANGE.rgb)
-        assertFailsWith<SketchGenerationException> { mockup.place(encoded(), SketchBackdrop.MAGENTA) }
+        isolated.setRGB(0, 0, Color.ORANGE.rgb)
+        assertFailsWith<SketchGenerationException> { mockup.place(encoded()) }
     }
 }

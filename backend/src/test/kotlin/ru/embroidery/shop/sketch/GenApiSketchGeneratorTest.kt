@@ -75,13 +75,13 @@ class GenApiSketchGeneratorTest {
                 "/api/v1/networks/flux-2" -> {
                     assertEquals("flash", body.path("model").stringValue())
                     assertEquals(1, body.path("num_images").intValue())
-                    assertEquals(listOf("data:image/jpeg;base64,BA==", "data:image/png;base64,Aw==", dataUri(source)),
+                    assertEquals(listOf(dataUri(source), "data:image/png;base64,Aw=="),
                         body.path("image_urls").asSequence().map { it.stringValue() }.toList())
                     val prompt = body.path("prompt").stringValue()
                     assertTrue(prompt.contains("Omit any car registration plate lettering"))
                     assertTrue(prompt.contains("without adding a separate background composition"))
-                    assertTrue(prompt.contains("Image 2 supplies only the previous embroidery motif"))
-                    assertTrue(prompt.contains("solid bright chroma magenta (#FF00FF)"))
+                    assertTrue(prompt.contains("The last image supplies only the previous embroidery motif"))
+                    assertTrue(prompt.contains("solid light-gray background"))
                     assertTrue(prompt.contains("No frames, measurement markings"))
                     assertEquals(1024, body.path("width").intValue())
                     assertEquals(1024, body.path("height").intValue())
@@ -134,7 +134,7 @@ class GenApiSketchGeneratorTest {
                     assertTrue(prompt.contains("Include the car registration plate only when its text is clearly legible"))
                     assertTrue(prompt.contains("Do not invent any characters"))
                     assertTrue(prompt.contains("No frames, measurement markings"))
-                    assertEquals(listOf("data:image/jpeg;base64,BA==", dataUri(source), dataUri(second), dataUri(third)),
+                    assertEquals(listOf(dataUri(source), dataUri(second), dataUri(third)),
                         body.path("image_urls").asSequence().map { it.stringValue() }.toList())
                     """{"request_id":1}""".toByteArray()
                 }
@@ -256,7 +256,16 @@ class GenApiSketchGeneratorTest {
             val auth = request.headers.getFirst(HttpHeaders.AUTHORIZATION)
             if (request.uri.host == "gen-api.storage.yandexcloud.net") assertNull(auth)
             else assertEquals("Bearer fixture-key", auth)
-            val response = respond(request.uri.path, if (bytes.isEmpty()) json.createObjectNode() else json.readTree(bytes))
+            val body = if (bytes.isEmpty()) json.createObjectNode() else json.readTree(bytes)
+            val response = when (request.uri.path) {
+                "/api/v1/functions/remove-background" -> {
+                    assertEquals("birefnet", body.path("implementation").stringValue())
+                    assertEquals(imageUrl, body.path("image").stringValue())
+                    """{"request_id":91,"status":"starting"}""".toByteArray()
+                }
+                "/api/v1/request/get/91" -> success(imageUrl)
+                else -> respond(request.uri.path, body)
+            }
             object : ClientHttpResponse {
                 override fun getStatusCode() = HttpStatus.OK
                 override fun getStatusText() = HttpStatus.OK.reasonPhrase

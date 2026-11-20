@@ -9,15 +9,16 @@ from urllib.parse import urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-def png(red, key):
+def png(red):
     def chunk(kind, data):
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
 
-    background = b"\x00" + key * 16
-    motif = b"\x00" + key * 3 + bytes((red, 40, 85)) * 10 + key * 3
+    transparent = bytes(4)
+    background = b"\x00" + transparent * 16
+    motif = b"\x00" + transparent * 3 + bytes((red, 40, 85, 255)) * 10 + transparent * 3
     return (
         b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", 16, 16, 8, 2, 0, 0, 0))
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 16, 16, 8, 6, 0, 0, 0))
         + chunk(b"IDAT", zlib.compress(background * 3 + motif * 10 + background * 3))
         + chunk(b"IEND", b"")
     )
@@ -37,6 +38,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.plan(request)
             elif self.path == "/api/v1/networks/flux-2":
                 self.generate(request)
+            elif self.path == "/api/v1/functions/remove-background":
+                self.isolate(request)
             else:
                 self.send_error(404)
         except (AssertionError, KeyError, IndexError, ValueError, TypeError):
@@ -90,7 +93,7 @@ class Handler(BaseHTTPRequestHandler):
         references = request["image_urls"]
         if "\nMini motif\n" in prompt:
             assert "details readable in miniature embroidery" in prompt and "frame at x=" not in prompt
-            assert len(references) == 2
+            assert len(references) == 1
             red = 92
         else:
             expected = re.search(r"(?m)^(standard|flash) (edit|draft (\d+))$", prompt)
@@ -98,18 +101,25 @@ class Handler(BaseHTTPRequestHandler):
             revision = expected[2] == "edit"
             assert "Compose the embroidered background from all three reference frames of the car" in prompt
             assert "Include the car registration plate only when its text is clearly legible" in prompt
-            assert len(references) == (5 if revision else 4)
+            assert len(references) == (4 if revision else 3)
             red = 120 if revision else 60 + int(expected[3])
-        assert references[0].startswith("data:image/jpeg;")
         assert all(image.startswith("data:image/") for image in references)
         assert request["num_images"] == 1
         assert request["output_format"] == "png"
         assert request["enable_safety_checker"] is True
         request_id = next(self.ids)
-        key = re.search(r"solid bright chroma \w+ \(#([0-9A-F]{6})\)", prompt)
-        assert key
-        self.images[request_id] = png(red, bytes.fromhex(key[1]))
+        assert "solid light-gray background" in prompt
+        self.images[request_id] = png(red)
         self.send_json({"request_id": request_id, "model": "flux-2", "status": "processing"})
+
+    def isolate(self, request):
+        assert request["implementation"] == "birefnet"
+        image = urlsplit(request["image"])
+        assert image.netloc == "sketch-stub:8080" and image.path.startswith("/results/")
+        source = int(image.path.rsplit("/", 1)[1])
+        request_id = next(self.ids)
+        self.images[request_id] = self.images.pop(source)
+        self.send_json({"request_id": request_id, "status": "starting"})
 
     def do_GET(self):
         path = urlsplit(self.path).path
