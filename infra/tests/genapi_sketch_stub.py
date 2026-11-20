@@ -9,14 +9,16 @@ from urllib.parse import urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-def png(red):
+def png(red, key):
     def chunk(kind, data):
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
 
+    background = b"\x00" + key * 16
+    motif = b"\x00" + key * 3 + bytes((red, 40, 85)) * 10 + key * 3
     return (
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", struct.pack(">IIBBBBB", 16, 16, 8, 2, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress((b"\x00" + bytes((red, 0, 125)) * 16) * 16))
+        + chunk(b"IDAT", zlib.compress(background * 3 + motif * 10 + background * 3))
         + chunk(b"IEND", b"")
     )
 
@@ -42,6 +44,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def plan(self, request):
         content = request["messages"][1]["content"]
+        texts = [item["text"] for item in content if item["type"] == "text"]
+        if "Выбранная рамка вышивки: 80 × 80 мм." in texts:
+            assert "выбранное менеджером" in request["messages"][0]["content"]
+            assert "Покупатель: Перенесите рисунок в центр груди" in texts
+            self.send_plan({"prompts": ["Mini motif"]})
+            return
         assert content[0] == {"type": "text", "text": "Примеры команды для эскиза:"}
         end_examples = content.index({"type": "text", "text": "Данные текущего заказа:"})
         examples, content = content[:end_examples], content[end_examples + 1:]
@@ -62,33 +70,45 @@ class Handler(BaseHTTPRequestHandler):
         assert "Фон вышивки: композиция из трёх исходных кадров автомобиля." in texts
         assert "Госномер автомобиля: вышить." in texts
         revision = "Выбранный эскиз для правки:" in texts
-        assert len(images) == (5 if revision else 4)
+        assert len(images) == (7 if revision else 6)
+        assert images[0].startswith("data:image/jpeg;") and images[1].startswith("data:image/png;")
         if revision:
-            assert images[0] not in images[1:]
+            assert images[2] not in images[3:]
             assert texts[-1] == "Замечания сотрудника к выбранному эскизу: Оставьте только контур"
         expected_model = "gemini-3-1-flash-lite" if browser or revision else "gemini-2-5-flash-lite"
         assert request["model"] == expected_model
         prompts = ["standard edit"] if revision else [
             f'{"standard" if browser else "flash"} draft {index}' for index in range(2)
         ]
-        self.send_json({"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"prompts": prompts})}}]})
+        self.send_plan({"prompts": prompts})
+
+    def send_plan(self, plan):
+        self.send_json({"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(plan)}}]})
 
     def generate(self, request):
         prompt = request["prompt"]
-        expected = re.search(r"(?m)^(standard|flash) (edit|draft (\d+))$", prompt)
-        assert expected and request["model"] == expected[1]
-        revision = expected[2] == "edit"
-        assert "Compose the embroidered background from all three reference frames of the car" in prompt
-        assert "Include the car registration plate only when its text is clearly legible" in prompt
         references = request["image_urls"]
-        assert len(references) == (6 if revision else 5)
-        assert references[0].startswith("data:image/jpeg;") and references[1].startswith("data:image/png;")
+        if "\nMini motif\n" in prompt:
+            assert "details readable in miniature embroidery" in prompt and "frame at x=" not in prompt
+            assert len(references) == 2
+            red = 92
+        else:
+            expected = re.search(r"(?m)^(standard|flash) (edit|draft (\d+))$", prompt)
+            assert expected and request["model"] == expected[1]
+            revision = expected[2] == "edit"
+            assert "Compose the embroidered background from all three reference frames of the car" in prompt
+            assert "Include the car registration plate only when its text is clearly legible" in prompt
+            assert len(references) == (5 if revision else 4)
+            red = 120 if revision else 60 + int(expected[3])
+        assert references[0].startswith("data:image/jpeg;")
         assert all(image.startswith("data:image/") for image in references)
         assert request["num_images"] == 1
         assert request["output_format"] == "png"
         assert request["enable_safety_checker"] is True
         request_id = next(self.ids)
-        self.images[request_id] = png(120 if revision else 60 + int(expected[3]))
+        key = re.search(r"solid bright chroma \w+ \(#([0-9A-F]{6})\)", prompt)
+        assert key
+        self.images[request_id] = png(red, bytes.fromhex(key[1]))
         self.send_json({"request_id": request_id, "model": "flux-2", "status": "processing"})
 
     def do_GET(self):

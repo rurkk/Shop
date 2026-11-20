@@ -125,6 +125,51 @@
   gap: 12px;
 }
 
+.placementEditor {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.placementCanvas {
+  position: relative;
+  width: min(100%, 27rem);
+  aspect-ratio: 1;
+  background: var(--order-surface);
+  overflow: hidden;
+}
+
+.placementImage {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.placementPanel,
+.placementFrame {
+  position: absolute;
+  box-sizing: border-box;
+}
+
+.placementPanel {
+  border: 1px dashed white;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 40%);
+  pointer-events: none;
+}
+
+.placementFrame {
+  padding: 0;
+  border: 2px solid white;
+  background: rgb(255 255 255 / 18%);
+  box-shadow: 0 0 0 1px black;
+  cursor: grab;
+  touch-action: none;
+}
+
+.placementFrame:active { cursor: grabbing; }
+.placementFrame:focus-visible { outline: 2px solid white; outline-offset: 3px; }
+
 .generationForm {
   display: grid;
   grid-template-columns: minmax(0, 12rem) auto;

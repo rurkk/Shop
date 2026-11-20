@@ -33,7 +33,7 @@ export type Product = {
   measurements: ProductMeasurements[];
 };
 export type CatalogContents = { catalog: Catalog; products: Page<ProductSummary> };
-export type EmbroideryFrame = "SMALL" | "STANDARD" | "LARGE";
+export type EmbroideryFrame = "MINI" | "SMALL" | "STANDARD" | "LARGE";
 export type EmbroideryConfiguration = {
   frame: EmbroideryFrame; threePhotoBackground: boolean; licensePlate: boolean;
 };

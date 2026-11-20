@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { filePath } from "@/lib/api";
 import type { EmbroideryConfiguration, OrderDetails } from "@/lib/contracts";
-import { calendarDateLabel, dateLabel, days, embroideryFrameLabel, embroideryFrameSizeMm, garmentLabel, money, moscowDateTimeLabel, providerLabels, statusLabels, typeLabels } from "@/lib/format";
+import { calendarDateLabel, dateLabel, days, embroideryFrameLabel, garmentLabel, money, moscowDateTimeLabel, providerLabels, statusLabels, typeLabels } from "@/lib/format";
 import { useTask } from "@/lib/hooks";
 import { Failure, Icon, Picture } from "./ui";
 
@@ -45,7 +45,7 @@ export function OrderAmounts({ details, showDelivery = true }: { details: OrderD
 
 export function OrderEmbroideryFacts({ embroidery }: { embroidery: EmbroideryConfiguration }) {
   return <>
-    <div><dt>Размер вышивки</dt><dd>{embroideryFrameLabel(embroideryFrameSizeMm[embroidery.frame])}</dd></div>
+    <div><dt>Размер вышивки</dt><dd>{embroideryFrameLabel(embroidery.frame)}</dd></div>
     <div><dt>Фон вышивки</dt><dd>{embroidery.threePhotoBackground ? "Из трёх кадров авто" : "Без фона"}</dd></div>
     <div><dt>Госномер</dt><dd>{embroidery.licensePlate ? "Включён в стоимость" : "Без госномера"}</dd></div>
   </>;

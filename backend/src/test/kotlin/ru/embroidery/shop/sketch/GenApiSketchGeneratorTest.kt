@@ -14,17 +14,24 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
+import java.util.Base64
 import java.util.UUID
+import javax.imageio.ImageIO
 
 class GenApiSketchGeneratorTest {
     private val json = JsonMapper.builder().build()
-    private val source = SketchImage("image/png", byteArrayOf(1))
+    private val source = photo(0x808080)
+    private val second = photo(0x505050)
+    private val third = photo(0x707070)
     private val attachment = SketchImage("image/jpeg", byteArrayOf(2))
     private val previous = SketchImage("image/png", byteArrayOf(3))
     private val mockup = SketchMockup(
         garment = "HOODIE", size = "M", color = "Чёрный",
-        placement = SketchPlacement(GarmentSide.FRONT, 500, 500, 160, 160),
-        template = SketchImage("image/jpeg", byteArrayOf(4)), guide = SketchImage("image/png", byteArrayOf(5)),
+        placement = SketchPlacement(GarmentSide.FRONT, 500, 500, 160, 160, SketchPosition.CENTER),
+        panel = SketchRectangle(115, 115, 340, 340),
+        template = SketchImage("image/jpeg", byteArrayOf(4)),
     )
     private val request = SketchGenerationRequest(
         null, emptyList(), listOf(source), mockup, EmbroideryConfiguration(EmbroideryFrame.STANDARD, false, false),
@@ -50,12 +57,14 @@ class GenApiSketchGeneratorTest {
                         "Файл-пример: palette.png", "data:image/png;base64,Bg==", "Данные текущего заказа:",
                         "Изделие заказа: HOODIE, размер одежды M, цвет Чёрный.",
                         "Сторона изделия: FRONT. Габариты мотива: 160 × 160 мм. Плоская зона шаблона: 500 × 500 мм. " +
-                            "Размер и положение уже рассчитаны в отдельной направляющей рамке для FLUX.2.",
+                            "Размер и положение уже рассчитаны в направляющей рамке для монтажа.",
+                        "Чистая заготовка изделия:", "data:image/jpeg;base64,BA==",
+                        "Направляющая рамка для масштаба и пропорций:", dataUri(mockup.guide),
                         "Выбранная рамка вышивки: 160 × 160 мм.",
                         "Фон вышивки: без отдельной фоновой композиции.",
                         "Госномер автомобиля: не вышивать.",
                         "Выбранный эскиз для правки:", "data:image/png;base64,Aw==",
-                        "Исходные фото заказа:", "data:image/png;base64,AQ==",
+                        "Исходные фото заказа:", dataUri(source),
                         "Описание заказа: Вышить машину",
                         "Покупатель: Оставьте номер", "data:image/jpeg;base64,Ag==",
                         "Сотрудник: Без фона",
@@ -66,17 +75,17 @@ class GenApiSketchGeneratorTest {
                 "/api/v1/networks/flux-2" -> {
                     assertEquals("flash", body.path("model").stringValue())
                     assertEquals(1, body.path("num_images").intValue())
-                    assertEquals(listOf("data:image/jpeg;base64,BA==", "data:image/png;base64,BQ==",
-                        "data:image/png;base64,Aw==", "data:image/png;base64,AQ=="),
+                    assertEquals(listOf("data:image/jpeg;base64,BA==", "data:image/png;base64,Aw==", dataUri(source)),
                         body.path("image_urls").asSequence().map { it.stringValue() }.toList())
                     val prompt = body.path("prompt").stringValue()
                     assertTrue(prompt.contains("Omit any car registration plate lettering"))
                     assertTrue(prompt.contains("without adding a separate background composition"))
-                    assertTrue(prompt.contains("Image 3 supplies only the previous embroidery motif"))
+                    assertTrue(prompt.contains("Image 2 supplies only the previous embroidery motif"))
+                    assertTrue(prompt.contains("solid bright chroma magenta (#FF00FF)"))
                     assertTrue(prompt.contains("No frames, measurement markings"))
                     assertEquals(1024, body.path("width").intValue())
                     assertEquals(1024, body.path("height").intValue())
-                    prompts += prompt.split("\n\n")[1]
+                    prompts += prompt.lineSequence().single { it == "Front view" || it == "Side view" }
                     """{"request_id":${++jobId}}""".toByteArray()
                 }
                 "/api/v1/request/get/1", "/api/v1/request/get/2" ->
@@ -104,7 +113,7 @@ class GenApiSketchGeneratorTest {
     @Test
     fun `three frame background and selected registration reach both providers`() {
         val withBackground = request.copy(
-            sourcePhotos = listOf(source, attachment, previous),
+            sourcePhotos = listOf(source, second, third),
             embroidery = EmbroideryConfiguration(EmbroideryFrame.LARGE, true, true),
         )
         val adapter = adapter { path, body ->
@@ -115,7 +124,7 @@ class GenApiSketchGeneratorTest {
                     assertTrue("Выбранная рамка вышивки: 220 × 220 мм." in texts)
                     assertTrue("Фон вышивки: композиция из трёх исходных кадров автомобиля." in texts)
                     assertTrue("Госномер автомобиля: вышить." in texts)
-                    assertEquals(listOf("data:image/png;base64,AQ==", "data:image/jpeg;base64,Ag==", "data:image/png;base64,Aw=="),
+                    assertEquals(listOf("data:image/jpeg;base64,BA==", dataUri(mockup.guide), dataUri(source), dataUri(second), dataUri(third)),
                         content.mapNotNull { it.path("image_url").path("url").stringValue(null) })
                     plan("Motif with the original registration")
                 }
@@ -125,8 +134,7 @@ class GenApiSketchGeneratorTest {
                     assertTrue(prompt.contains("Include the car registration plate only when its text is clearly legible"))
                     assertTrue(prompt.contains("Do not invent any characters"))
                     assertTrue(prompt.contains("No frames, measurement markings"))
-                    assertEquals(listOf("data:image/jpeg;base64,BA==", "data:image/png;base64,BQ==",
-                        "data:image/png;base64,AQ==", "data:image/jpeg;base64,Ag==", "data:image/png;base64,Aw=="),
+                    assertEquals(listOf("data:image/jpeg;base64,BA==", dataUri(source), dataUri(second), dataUri(third)),
                         body.path("image_urls").asSequence().map { it.stringValue() }.toList())
                     """{"request_id":1}""".toByteArray()
                 }
@@ -138,6 +146,49 @@ class GenApiSketchGeneratorTest {
         assertFailsWith<IllegalArgumentException> { withBackground.copy(sourcePhotos = listOf(source)) }
         assertEquals(1, adapter.generate(withBackground).size)
     }
+
+    @Test
+    fun `mini embroidery prompt uses the frame selected by staff`() {
+        val placed = mockup.copy(placement = mockup.placement.copy(
+            embroideryWidthMm = 80, embroideryHeightMm = 80, position = SketchPosition(30, 75),
+        ))
+        val mini = request.copy(
+            embroidery = EmbroideryConfiguration(EmbroideryFrame.MINI, false, false),
+            mockup = placed,
+            conversation = listOf(SketchMessage(Role.CUSTOMER, "Перенесите рисунок в центр груди")),
+        )
+        val adapter = adapter { path, body ->
+            when (path) {
+                "/v1/chat/completions" -> {
+                    val messages = body.path("messages")
+                    assertTrue(messages.path(0).path("content").stringValue().contains("выбранное менеджером"))
+                    val content = messages.path(1).path("content").toList()
+                    assertTrue("Покупатель: Перенесите рисунок в центр груди" in
+                        content.mapNotNull { it.path("text").stringValue(null) })
+                    assertTrue(dataUri(placed.guide) in content.mapNotNull { it.path("image_url").path("url").stringValue(null) })
+                    plan("Clear stitches")
+                }
+                "/api/v1/networks/flux-2" -> {
+                    assertTrue(body.path("prompt").stringValue().contains("details readable in miniature embroidery"))
+                    """{"request_id":1}""".toByteArray()
+                }
+                "/api/v1/request/get/1" -> success(imageUrl)
+                "/image.png" -> signature
+                else -> error("Unexpected request")
+            }
+        }
+        assertEquals(1, adapter.generate(mini).size)
+    }
+
+    private fun photo(color: Int): SketchImage {
+        val image = BufferedImage(8, 8, BufferedImage.TYPE_INT_RGB)
+        image.setRGB(3, 3, color)
+        val bytes = ByteArrayOutputStream()
+        ImageIO.write(image, "png", bytes)
+        return SketchImage("image/png", bytes.toByteArray())
+    }
+
+    private fun dataUri(image: SketchImage) = "data:${image.contentType};base64,${Base64.getEncoder().encodeToString(image.bytes)}"
 
     @Test
     fun `malformed plans fail before making a paid image request`() {
@@ -187,9 +238,11 @@ class GenApiSketchGeneratorTest {
         assertEquals(listOf("gemini-2-5-flash-lite", "flash", "gemini-3-1-flash-lite", "standard"), models)
     }
 
-    private fun plan(vararg prompts: String) = json.writeValueAsBytes(mapOf(
+    private fun plan(vararg prompts: String) = completion(mapOf("prompts" to prompts))
+
+    private fun completion(result: Map<String, Any?>) = json.writeValueAsBytes(mapOf(
         "choices" to listOf(mapOf("finish_reason" to "stop",
-            "message" to mapOf("content" to json.writeValueAsString(mapOf("prompts" to prompts))))),
+            "message" to mapOf("content" to json.writeValueAsString(result)))),
     ))
 
     private fun success(url: String) = json.writeValueAsBytes(mapOf("status" to "success", "result" to listOf(url)))

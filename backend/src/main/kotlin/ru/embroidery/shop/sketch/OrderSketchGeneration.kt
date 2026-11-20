@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.http.CacheControl
 import org.springframework.http.HttpStatus
+import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.security.core.annotation.AuthenticationPrincipal
@@ -17,6 +18,7 @@ import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.ResponseStatus
 import org.springframework.web.bind.annotation.RestController
 import ru.embroidery.shop.ApiFailure
@@ -59,7 +61,14 @@ internal class OrderSketchGeneration(
     fun workspace(orderId: UUID): SketchWorkspace {
         val order = orders.get(orderId)
         order.requireType(OrderType.CUSTOM_PHOTO)
-        return SketchWorkspace(generators.ifAvailable != null, jobs.latest(orderId), jobs.drafts(orderId), templates.estimates(order))
+        return SketchWorkspace(generators.ifAvailable != null, jobs.latest(orderId), jobs.drafts(orderId),
+            templates.estimates(order), templates.previews(order))
+    }
+
+    fun template(orderId: UUID, side: GarmentSide): SketchImage {
+        val order = orders.get(orderId)
+        order.requireType(OrderType.CUSTOM_PHOTO)
+        return templates.image(order, side)
     }
 
     @Transactional
@@ -94,14 +103,19 @@ internal class OrderSketchGeneration(
         val job = jobs.claim() ?: return
         try {
             val actor = Actor(job.requestedBy, Role.STAFF)
-            val variants = generator.generate(buildRequest(actor, job))
+            val request = buildRequest(actor, job)
+            val variants = generator.generate(request)
             if (variants.size !in 1..job.maxVariants) throw SketchGenerationException("Invalid number of variants")
-            saveVariants(actor, job, variants)
+            saveVariants(actor, job, variants.map { it.copy(image = request.mockup.place(it.image, request.backdrop)) })
         } catch (_: SketchContextTooLarge) {
             jobs.fail(job.id, "CONTEXT_TOO_LARGE")
+        } catch (_: SketchGenApiLimitReached) {
+            logger.warn("Sketch generation job {} reached the GenAPI spending limit", job.id)
+            jobs.fail(job.id, "PROVIDER_LIMIT_REACHED")
         } catch (error: Exception) {
             if (error is InterruptedException) Thread.currentThread().interrupt()
-            logger.warn("Sketch generation job {} failed ({})", job.id, error.javaClass.simpleName)
+            val reason = if (error is SketchGenerationException) error.message else error.javaClass.simpleName
+            logger.warn("Sketch generation job {} failed ({})", job.id, reason)
             jobs.fail(job.id, "GENERATION_FAILED")
         }
     }
@@ -181,6 +195,11 @@ internal class OrderSketchGenerationController(private val generation: OrderSket
     @GetMapping
     fun workspace(@PathVariable orderId: UUID): ResponseEntity<SketchWorkspace> =
         ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(generation.workspace(orderId))
+
+    @GetMapping("/template")
+    fun template(@PathVariable orderId: UUID, @RequestParam side: GarmentSide): ResponseEntity<ByteArray> =
+        ResponseEntity.ok().cacheControl(CacheControl.noStore()).contentType(MediaType.IMAGE_JPEG)
+            .body(generation.template(orderId, side).bytes)
 
     @PostMapping
     @ResponseStatus(HttpStatus.ACCEPTED)

@@ -127,9 +127,10 @@ class OrderPayments(
         }
         val embroideryLine = terms.embroidery?.let {
             val size = it.frame.sizeMm / 10
+            val frame = if (it.frame == EmbroideryFrame.MINI) "мини-вышивка, до $size × $size см" else "рамка $size × $size см"
             val background = if (it.threePhotoBackground) "фон из трёх кадров авто" else "без фона"
             val licensePlate = if (it.licensePlate) ", вышивка госномера в подарок" else ""
-            "\nВышивка: рамка $size × $size см, $background$licensePlate."
+            "\nВышивка: $frame, $background$licensePlate."
         }.orEmpty()
         val deliveryDate = terms.deliverBy.format(DateTimeFormatter.ofPattern("dd.MM.uuuu"))
         mail.notifyCustomer(order.id, order.email, "Заказ KNITSEW подтверждён", """

@@ -280,6 +280,11 @@ test("покупатель и менеджер проводят заказ от 
     await page.getByRole("combobox", { name: "Размер одежды", exact: true }).selectOption("M");
     await page.getByRole("combobox", { name: "Цвет" }).selectOption("Чёрный");
     const background = page.getByRole("checkbox", { name: "Фон из трёх кадров авто", exact: true });
+    await page.getByRole("radio", { name: "Мини-вышивка · до 8 × 8 см", exact: true }).check();
+    await expect(page.getByText(/^6\s*000\s*₽$/).first()).toBeVisible();
+    await page.getByRole("combobox", { name: "Изделие" }).selectOption("T_SHIRT");
+    await expect(page.getByText(/^5\s*000\s*₽$/).first()).toBeVisible();
+    await page.getByRole("combobox", { name: "Изделие" }).selectOption("HOODIE");
     await page.getByRole("radio", { name: "16 × 16 см", exact: true }).check();
     await expect(background).toHaveCount(0);
     await page.getByRole("radio", { name: "22 × 22 см", exact: true }).check();
@@ -465,7 +470,22 @@ test("покупатель и менеджер проводят заказ от 
       expect(desktopButton.height).toBeCloseTo(desktopField.height, 0);
       expect(desktopButton.x).toBeGreaterThan(desktopField.x);
       await staff.setViewportSize(narrow);
+      const frame = generation.getByRole("button", { name: "Рамка вышивки" });
+      await frame.scrollIntoViewIfNeeded();
+      const frameBounds = (await frame.boundingBox())!;
+      const left = frameBounds.x + frameBounds.width / 2;
+      const top = frameBounds.y + frameBounds.height / 2;
+      await staff.mouse.move(left, top);
+      await staff.mouse.down();
+      await staff.mouse.move(left + 18, top + 8);
+      await staff.mouse.up();
+      await expect(generation.getByRole("button", { name: "Вернуть исходное положение" })).toBeVisible();
+      await frame.press("ArrowRight");
+      const generationRequest = staff.waitForRequest(
+        (request) => request.method() === "POST" && new URL(request.url()).pathname.endsWith("/sketch-generation"),
+      );
       await generate.click();
+      expect((await generationRequest).postDataJSON().placement.position.xPercent).toBeGreaterThan(50);
       const drafts = generation.getByRole("article");
       await expect(drafts).toHaveCount(2);
       await expect(drafts.nth(1).getByRole("img")).toBeVisible();

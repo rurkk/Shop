@@ -5,6 +5,7 @@ import jakarta.validation.constraints.Min
 import org.springframework.core.io.ClassPathResource
 import org.springframework.stereotype.Component
 import ru.embroidery.shop.badRequest
+import ru.embroidery.shop.order.EmbroideryFrame
 import ru.embroidery.shop.order.Garment
 import ru.embroidery.shop.order.Order
 import java.awt.Color
@@ -25,7 +26,20 @@ internal data class SketchPlacement(
     @field:Min(1) @field:Max(9999) val panelHeightMm: Int,
     @field:Min(1) @field:Max(9999) val embroideryWidthMm: Int,
     @field:Min(1) @field:Max(9999) val embroideryHeightMm: Int,
+    val position: SketchPosition,
 )
+
+internal data class SketchPosition(val xPercent: Int, val yPercent: Int) {
+    init {
+        require(xPercent in 0..100 && yPercent in 0..100)
+    }
+
+    companion object {
+        val CENTER = SketchPosition(50, 50)
+        // On a front-view template, the wearer's left is on the right of the image.
+        val LEFT_CHEST = SketchPosition(90, 22)
+    }
+}
 
 internal data class SketchRectangle(val x: Int, val y: Int, val width: Int, val height: Int) {
     init {
@@ -40,7 +54,9 @@ internal data class SketchRectangle(val x: Int, val y: Int, val width: Int, val 
         val frameWidth = (width.toDouble() * placement.embroideryWidthMm / placement.panelWidthMm).roundToInt()
         val frameHeight = (height.toDouble() * placement.embroideryHeightMm / placement.panelHeightMm).roundToInt()
         if (frameWidth < 2 || frameHeight < 2) badRequest("Embroidery is too small to preview")
-        return SketchRectangle(x + (width - frameWidth) / 2, y + (height - frameHeight) / 2, frameWidth, frameHeight)
+        val left = (width - frameWidth) * placement.position.xPercent / 100
+        val top = (height - frameHeight) * placement.position.yPercent / 100
+        return SketchRectangle(x + left, y + top, frameWidth, frameHeight)
     }
 
     fun guide(): SketchImage {
@@ -67,9 +83,14 @@ internal data class SketchMockup(
     val size: String,
     val color: String,
     val placement: SketchPlacement,
+    val panel: SketchRectangle,
     val template: SketchImage,
-    val guide: SketchImage,
-)
+) {
+    val frame = panel.frame(placement)
+    val guide by lazy { frame.guide() }
+}
+
+internal data class SketchPanelPreview(val area: SketchRectangle, val defaultPosition: SketchPosition)
 
 internal data class SketchPanelEstimate(
     val panelWidthMm: Int,
@@ -110,10 +131,8 @@ internal class SketchGarmentTemplates {
 
     fun prepare(order: Order, placement: SketchPlacement): SketchMockup {
         val (panel, template) = resourceFor(order, placement.side)
-        val frame = panel.area.frame(placement)
         return SketchMockup(
-            order.garment, order.size, order.color, placement,
-            SketchImage("image/jpeg", template.inputStream.use { it.readAllBytes() }), frame.guide(),
+            order.garment, order.size, order.color, placement, panel.area, loadTemplate(template),
         )
     }
 
@@ -121,6 +140,19 @@ internal class SketchGarmentTemplates {
         if (order.size != "M") return emptyMap()
         return GarmentSide.entries.mapNotNull { side -> find(order, side)?.let { side to it.first.estimate } }.toMap()
     }
+
+    fun previews(order: Order): Map<GarmentSide, SketchPanelPreview> = GarmentSide.entries.mapNotNull { side ->
+        find(order, side)?.let { side to SketchPanelPreview(it.first.area, defaultPosition(order, side)) }
+    }.toMap()
+
+    fun image(order: Order, side: GarmentSide): SketchImage = loadTemplate(resourceFor(order, side).second)
+
+    private fun loadTemplate(template: ClassPathResource) =
+        SketchImage("image/jpeg", template.inputStream.use { it.readAllBytes() })
+
+    private fun defaultPosition(order: Order, side: GarmentSide) =
+        if (order.embroidery?.frame == EmbroideryFrame.MINI && side == GarmentSide.FRONT) SketchPosition.LEFT_CHEST
+        else SketchPosition.CENTER
 
     private fun resourceFor(order: Order, side: GarmentSide) =
         find(order, side) ?: badRequest("No template for this garment, color and side")

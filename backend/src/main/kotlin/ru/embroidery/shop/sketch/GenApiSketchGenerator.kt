@@ -6,12 +6,14 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.core.env.Environment
 import org.springframework.core.env.Profiles
 import org.springframework.http.MediaType
+import org.springframework.http.HttpStatus
 import org.springframework.http.client.JdkClientHttpRequestFactory
 import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
 import org.springframework.web.client.RestClientException
 import ru.embroidery.shop.auth.Role
 import ru.embroidery.shop.files.MAX_IMAGE_BYTES
+import ru.embroidery.shop.order.EmbroideryFrame
 import tools.jackson.databind.JsonNode
 import tools.jackson.databind.ObjectMapper
 import java.io.IOException
@@ -47,7 +49,6 @@ internal class GenApiSketchGenerator internal constructor(
         val configuration = currentConfiguration()
         val references = buildList {
             add(request.mockup.template)
-            add(request.mockup.guide)
             request.revision?.let { add(it.previousSketch) }
             addAll(request.sourcePhotos)
         }.map(::dataUri)
@@ -79,7 +80,7 @@ internal class GenApiSketchGenerator internal constructor(
             "response_format" to mapOf("type" to "json_object"),
             "max_tokens" to 1800,
             "messages" to listOf(
-                mapOf("role" to "system", "content" to instructions(configuration.selection.systemPrompt, request.maxVariants, request.revision != null)),
+                mapOf("role" to "system", "content" to instructions(configuration.selection.systemPrompt, request)),
                 mapOf("role" to "user", "content" to content(request, configuration.references)),
             ),
         ))
@@ -151,6 +152,7 @@ internal class GenApiSketchGenerator internal constructor(
     private fun read(request: RestClient.RequestHeadersSpec<*>, limit: Int): ByteArray = try {
         request.exchange { _, response ->
             if (!response.statusCode.is2xxSuccessful) {
+                if (response.statusCode == HttpStatus.PAYMENT_REQUIRED) throw SketchGenApiLimitReached()
                 throw SketchGenerationException("GenAPI returned HTTP ${response.statusCode.value()}")
             }
             response.body.readNBytes(limit + 1).also {
@@ -186,9 +188,16 @@ internal class GenApiSketchGenerator internal constructor(
         text("Сторона изделия: ${mockup.placement.side}. Габариты мотива: " +
             "${mockup.placement.embroideryWidthMm} × ${mockup.placement.embroideryHeightMm} мм. " +
             "Плоская зона шаблона: ${mockup.placement.panelWidthMm} × ${mockup.placement.panelHeightMm} мм. " +
-            "Размер и положение уже рассчитаны в отдельной направляющей рамке для FLUX.2.")
+            "Размер и положение уже рассчитаны в направляющей рамке для монтажа.")
+        text("Чистая заготовка изделия:")
+        image(mockup.template)
+        text("Направляющая рамка для масштаба и пропорций:")
+        image(mockup.guide)
         val frameSize = request.embroidery.frame.sizeMm
         text("Выбранная рамка вышивки: $frameSize × $frameSize мм.")
+        if (request.embroidery.frame == EmbroideryFrame.MINI) {
+            text("Мини-вышивка. Сохрани узнаваемый силуэт и убери детали, которые потеряются при таком размере.")
+        }
         text(if (request.embroidery.threePhotoBackground) {
             "Фон вышивки: композиция из трёх исходных кадров автомобиля."
         } else {
@@ -210,21 +219,21 @@ internal class GenApiSketchGenerator internal constructor(
         request.revision?.let { text("Замечания сотрудника к выбранному эскизу: ${it.feedback}") }
     }
 
-    private fun instructions(systemPrompt: String, maxVariants: Int, revision: Boolean): String = systemPrompt + "\n\n" + """
-        Генератор получает чистую заготовку одежды как изображение 1 и направляющую рамку того же размера как изображение 2.
-        Описывай сюжет внутри рамки. Сохраняй тип, цвет, сторону, складки, ракурс и фон заготовки.
-        Согласованные размеры учтены в рамке. Исключи из промпта числовые габариты, подписи, линейки и размерные стрелки.
+    private fun instructions(systemPrompt: String, request: SketchGenerationRequest): String = systemPrompt + "\n\n" + """
+        Используй заготовку и направляющую для выбора композиции, контраста, пропорций и уровня деталей.
+        Попроси FLUX.2 изобразить только вышитый нитками мотив с чистыми краями на однотонном фоне, который задаёт сервис.
+        Сервис сам удалит этот фон и разместит мотив внутри прямоугольника на заготовке. Исключи одежду, рамки и размерные обозначения из сюжета.
         Соблюдай параметры изделия, выбранной стороны, размера, фона вышивки и госномера из заказа. Они действуют и при правках.
-        Описание, переписка, примеры и предыдущий эскиз уточняют только сюжет в этих границах.
+        Сохраняй положение направляющей, выбранное менеджером. Описание, переписка, примеры и предыдущий эскиз уточняют сюжет в этих границах.
         Если заказан фон из трёх кадров, опиши композицию внутри вышитого мотива по всем трём исходным кадрам автомобиля.
         Если заказан госномер, используй только явно указанный или разборчивый на исходных фото номер. Не придумывай символы.
-        ${if (revision) "Изображение 3 — выбранный эскиз. Используй его только как образец вышитого мотива и опиши требуемые правки." else ""}
-        Верни только JSON-объект с полем "prompts", содержащим от 1 до $maxVariants строк длиной до 3000 символов.
+        ${if (request.revision != null) "Выбранный эскиз используй как образец вышитого мотива и опиши требуемые правки." else ""}
+        Верни только JSON-объект с полем "prompts", содержащим от 1 до ${request.maxVariants} строк длиной до 3000 символов.
     """.trimIndent()
 
     private fun imageInstructions(prompt: String, request: SketchGenerationRequest): String {
         val revision = request.revision != null
-        val sourceImages = if (revision) "Images 4 onward" else "Images 3 onward"
+        val sourceImages = if (revision) "Images 3 onward" else "Images 2 onward"
         val background = if (request.embroidery.threePhotoBackground) {
             "$sourceImages are the three source photos. Compose the embroidered background from all three reference frames of the car, within the embroidery only."
         } else {
@@ -236,19 +245,21 @@ internal class GenApiSketchGenerator internal constructor(
             "Omit any car registration plate lettering, even if it appears in the references."
         }
         return """
-            Edit Image 1, the exact clean garment photograph. Preserve its clothing type, color, side,
-            fold, outline, texture, crop, lighting and background. Add only the requested embroidery.
-            Image 2 is a separate full-canvas placement guide. Its rectangle gives the exact placement and
-            requested size on Image 1. Fit the entire stitched motif closely inside that rectangle, without
-            stretching its natural proportions. Keep blank fabric between the embroidery and surrounding details.
-            ${if (revision) "Image 3 supplies only the previous embroidery motif. Apply the requested changes within the guide." else ""}
+            Render only the isolated machine-embroidered motif. Use Image 1 as a reference for thread color contrast.
+            Show real thread texture, small directional stitches and clean stitched edges. Never show the garment,
+            fabric, garment folds, hoop, border, outline rectangle, patch backing or drop shadow around the motif.
+            Put every stitch on a perfectly flat ${request.backdrop.description} background, including
+            any open spaces between elements. Leave wide uninterrupted bands of the same color on all four edges.
+            Use that color exclusively for the background. Keep the entire motif in the image, with no crop.
+            ${if (revision) "Image 2 supplies only the previous embroidery motif. Apply the requested changes to that motif." else ""}
             $background
             $plate
+            ${if (request.embroidery.frame == EmbroideryFrame.MINI) "Use a clear silhouette and only details readable in miniature embroidery." else ""}
             These choices take precedence over any conflicting description of the motif below.
 
             $prompt
 
-            Return a clean product photo. The guide and its outline must never appear in the result.
+            Return the isolated thread motif on the specified solid color. The guide must never appear in the result.
             No frames, measurement markings, rulers, labels or annotation overlays.
             The only permitted lettering is explicitly requested embroidery inside the motif.
         """.trimIndent()

@@ -7,6 +7,7 @@ import jakarta.validation.constraints.Size
 import org.springframework.jdbc.core.RowMapper
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
+import java.sql.ResultSet
 import java.sql.Types
 import java.time.OffsetDateTime
 import java.util.UUID
@@ -25,6 +26,7 @@ internal data class SketchJobSummary(
     val status: SketchJobStatus,
     val createdAt: OffsetDateTime,
     val failure: String?,
+    val placement: SketchPlacement?,
 )
 
 internal data class SketchDraft(
@@ -40,6 +42,7 @@ internal data class SketchWorkspace(
     val latestJob: SketchJobSummary?,
     val drafts: List<SketchDraft>,
     val panelEstimates: Map<GarmentSide, SketchPanelEstimate>,
+    val panelPreviews: Map<GarmentSide, SketchPanelPreview>,
 )
 
 internal data class ClaimedSketchJob(
@@ -58,12 +61,14 @@ internal class SketchJobs(private val db: JdbcClient) {
     private val summaryMapper = RowMapper { rs, _ ->
         SketchJobSummary(
             rs.getObject("id", UUID::class.java), SketchJobStatus.valueOf(rs.getString("status")),
-            rs.getObject("created_at", OffsetDateTime::class.java), rs.getString("failure"),
+            rs.getObject("created_at", OffsetDateTime::class.java), rs.getString("failure"), rs.placement(),
         )
     }
 
     fun latest(orderId: UUID): SketchJobSummary? = db.sql("""
-        SELECT id, status, created_at, failure FROM sketch_generation_jobs
+        SELECT id, status, created_at, failure, garment_side, panel_width_mm, panel_height_mm,
+               embroidery_width_mm, embroidery_height_mm, frame_x_percent, frame_y_percent
+        FROM sketch_generation_jobs
         WHERE order_id = :order ORDER BY created_at DESC, id DESC LIMIT 1
     """).param("order", orderId).query(summaryMapper).optional().orElse(null)
 
@@ -89,11 +94,13 @@ internal class SketchJobs(private val db: JdbcClient) {
         db.sql("""
             INSERT INTO sketch_generation_jobs
                 (id, order_id, requested_by, through_sequence, max_variants, previous_file_id, feedback, status,
-                 garment_side, panel_width_mm, panel_height_mm, embroidery_width_mm, embroidery_height_mm)
+                 garment_side, panel_width_mm, panel_height_mm, embroidery_width_mm, embroidery_height_mm,
+                 frame_x_percent, frame_y_percent)
             VALUES (:id, :order, :staff, :sequence, :variants, :previous, :feedback, 'QUEUED',
-                    :side, :panelWidth, :panelHeight, :embroideryWidth, :embroideryHeight)
+                    :side, :panelWidth, :panelHeight, :embroideryWidth, :embroideryHeight, :frameX, :frameY)
             ON CONFLICT (order_id) WHERE status IN ('QUEUED', 'RUNNING') DO NOTHING
-            RETURNING id, status, created_at, failure
+            RETURNING id, status, created_at, failure, garment_side, panel_width_mm, panel_height_mm,
+                      embroidery_width_mm, embroidery_height_mm, frame_x_percent, frame_y_percent
         """).param("id", UUID.randomUUID()).param("order", orderId).param("staff", staff)
             .param("sequence", throughSequence).param("variants", input.maxVariants)
             .param("previous", input.previousFileId, Types.OTHER).param("feedback", input.feedback, Types.VARCHAR)
@@ -101,6 +108,7 @@ internal class SketchJobs(private val db: JdbcClient) {
             .param("panelWidth", input.placement.panelWidthMm).param("panelHeight", input.placement.panelHeightMm)
             .param("embroideryWidth", input.placement.embroideryWidthMm)
             .param("embroideryHeight", input.placement.embroideryHeightMm)
+            .param("frameX", input.placement.position.xPercent).param("frameY", input.placement.position.yPercent)
             .query(summaryMapper).optional().orElse(null)
 
     fun claim(): ClaimedSketchJob? = db.sql("""
@@ -111,19 +119,24 @@ internal class SketchJobs(private val db: JdbcClient) {
         UPDATE sketch_generation_jobs j SET status = 'RUNNING', started_at = now()
         FROM next WHERE j.id = next.id
         RETURNING j.id, j.order_id, j.requested_by, j.through_sequence, j.max_variants, j.previous_file_id, j.feedback,
-                  j.garment_side, j.panel_width_mm, j.panel_height_mm, j.embroidery_width_mm, j.embroidery_height_mm
+                  j.garment_side, j.panel_width_mm, j.panel_height_mm, j.embroidery_width_mm, j.embroidery_height_mm,
+                  j.frame_x_percent, j.frame_y_percent
     """).query { rs, _ ->
         ClaimedSketchJob(
             rs.getObject("id", UUID::class.java), rs.getObject("order_id", UUID::class.java),
             rs.getString("requested_by"), rs.getLong("through_sequence"), rs.getInt("max_variants"),
             rs.getObject("previous_file_id", UUID::class.java), rs.getString("feedback"),
-            SketchPlacement(
-                GarmentSide.valueOf(rs.getString("garment_side")),
-                rs.getInt("panel_width_mm"), rs.getInt("panel_height_mm"),
-                rs.getInt("embroidery_width_mm"), rs.getInt("embroidery_height_mm"),
-            ),
+            requireNotNull(rs.placement()),
         )
     }.optional().orElse(null)
+
+    private fun ResultSet.placement(): SketchPlacement? = getString("garment_side")?.let { side ->
+        SketchPlacement(
+            GarmentSide.valueOf(side), getInt("panel_width_mm"), getInt("panel_height_mm"),
+            getInt("embroidery_width_mm"), getInt("embroidery_height_mm"),
+            SketchPosition(getInt("frame_x_percent"), getInt("frame_y_percent")),
+        )
+    }
 
     fun expireInterrupted() {
         db.sql("""

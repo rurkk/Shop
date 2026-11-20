@@ -24,6 +24,8 @@ internal data class SketchGenerationRequest(
     val maxVariants: Int = 1,
     val revision: SketchRevision? = null,
 ) {
+    val backdrop by lazy { SketchBackdrop.choose(sourcePhotos) }
+
     init {
         require(sourcePhotos.isNotEmpty()) { "At least one source photo is required" }
         require(!embroidery.threePhotoBackground || sourcePhotos.size == BACKGROUND_PHOTO_COUNT) {
@@ -50,6 +52,7 @@ internal class SketchImage(val contentType: String, val bytes: ByteArray) {
 }
 
 internal data class SketchVariant(val image: SketchImage, val interpretation: String? = null)
+internal class SketchGenApiLimitReached : RuntimeException()
 
 /** The message must omit request content and credentials. */
 internal class SketchGenerationException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)

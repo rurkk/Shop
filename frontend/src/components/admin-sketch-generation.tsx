@@ -3,16 +3,24 @@
 import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from "react";
 import { filePath, read, write } from "@/lib/api";
 import type { Order } from "@/lib/contracts";
-import { embroideryFrameSizeMm, millimetersInput } from "@/lib/format";
+import { embroideryFrameSizeMm } from "@/lib/format";
 import { useTask } from "@/lib/hooks";
+import { SketchPlacementEditor, type SketchPanelPreview, type SketchPosition } from "./sketch-placement-editor";
 import { Failure, Modal, Notice, Pending, Picture } from "./ui";
 import styles from "./admin-order.module.css";
 
-type Job = { status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED"; failure: string | null };
-type Draft = { fileId: string; interpretation: string | null; published: boolean };
 type Side = "FRONT" | "BACK";
+type Placement = {
+  side: Side; panelWidthMm: number; panelHeightMm: number; embroideryWidthMm: number; embroideryHeightMm: number;
+  position: SketchPosition;
+};
+type Job = { status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED"; failure: string | null; placement: Placement | null };
+type Draft = { fileId: string; interpretation: string | null; published: boolean };
 type PanelEstimate = { panelWidthMm: number; panelHeightMm: number; foldedWidthMm: number; foldedHeightMm: number };
-type Workspace = { available: boolean; latestJob: Job | null; drafts: Draft[]; panelEstimates: Partial<Record<Side, PanelEstimate>> };
+type Workspace = {
+  available: boolean; latestJob: Job | null; drafts: Draft[]; panelEstimates: Partial<Record<Side, PanelEstimate>>;
+  panelPreviews: Partial<Record<Side, SketchPanelPreview>>;
+};
 
 function isActive(job: Job | null | undefined) {
   return job?.status === "QUEUED" || job?.status === "RUNNING";
@@ -21,6 +29,7 @@ function isActive(job: Job | null | undefined) {
 const failureLabels: Record<string, string> = {
   CONTEXT_TOO_LARGE: "Переписка и вложения превышают лимит генерации.",
   INTERRUPTED: "Генерация прервалась. Запустите её ещё раз.",
+  PROVIDER_LIMIT_REACHED: "GenAPI отклонил запрос из-за лимита расходов или недостаточного баланса.",
   GENERATION_FAILED: "Не удалось получить эскиз. Попробуйте ещё раз.",
 };
 
@@ -28,6 +37,8 @@ export function AdminSketchGeneration({ order, path, publishedFileId, busy, onPu
   order: Order; path: string; publishedFileId?: string; busy: boolean;
   onPublish: (fileId: string) => Promise<unknown>;
 }) {
+  const frameMm = order.embroidery ? embroideryFrameSizeMm[order.embroidery.frame] : undefined;
+  const initialMotifCm = frameMm === undefined ? "" : String(frameMm / 10);
   const [workspace, setWorkspace] = useState<Workspace>();
   const [loadError, setLoadError] = useState<Error>();
   const [refresh, setRefresh] = useState(0);
@@ -36,9 +47,13 @@ export function AdminSketchGeneration({ order, path, publishedFileId, busy, onPu
   const [preview, setPreview] = useState<{ draft: Draft; title: string; publish: boolean }>();
   const [published, setPublished] = useState<string>();
   const [generationFor, setGenerationFor] = useState<string>();
-  const [side, setSide] = useState<Side | "">("");
+  const [side, setSide] = useState<Side | "">(order.embroidery?.frame === "MINI" ? "FRONT" : "");
   const [panelWidth, setPanelWidth] = useState("");
   const [panelHeight, setPanelHeight] = useState("");
+  const [embroideryWidth, setEmbroideryWidth] = useState(initialMotifCm);
+  const [embroideryHeight, setEmbroideryHeight] = useState(initialMotifCm);
+  const [position, setPosition] = useState<SketchPosition>();
+  const restoredPlacement = useRef(false);
   const generationStatus = useRef<HTMLDivElement>(null);
   const revisionInput = useRef<HTMLTextAreaElement>(null);
   const revisionTrigger = useRef<HTMLButtonElement>(null);
@@ -52,6 +67,18 @@ export function AdminSketchGeneration({ order, path, publishedFileId, busy, onPu
       try {
         const next = await read<Workspace>(path, controller.signal);
         if (controller.signal.aborted) return;
+        if (!restoredPlacement.current) {
+          restoredPlacement.current = true;
+          const previous = next.latestJob?.placement;
+          if (previous) {
+            setSide(previous.side);
+            setPanelWidth(String(previous.panelWidthMm / 10));
+            setPanelHeight(String(previous.panelHeightMm / 10));
+            setEmbroideryWidth(String(previous.embroideryWidthMm / 10));
+            setEmbroideryHeight(String(previous.embroideryHeightMm / 10));
+            setPosition(previous.position);
+          }
+        }
         setWorkspace(next);
         setLoadError(undefined);
         if (isActive(next.latestJob) && next.available) timer = setTimeout(() => void load(), 2000);
@@ -77,22 +104,22 @@ export function AdminSketchGeneration({ order, path, publishedFileId, busy, onPu
   const reload = () => setRefresh((value) => value + 1);
   const latestJob = workspace?.latestJob;
   const active = isActive(latestJob) && workspace?.available;
-  const frameMm = order.embroidery ? embroideryFrameSizeMm[order.embroidery.frame] : undefined;
   const estimate = side ? workspace?.panelEstimates[side] : undefined;
+  const panel = side ? workspace?.panelPreviews[side] : undefined;
+  const selectedPosition = position ?? panel?.defaultPosition;
+  const measurements = {
+    panelWidthMm: Math.round(Number(panelWidth) * 10),
+    panelHeightMm: Math.round(Number(panelHeight) * 10),
+    embroideryWidthMm: Math.round(Number(embroideryWidth) * 10),
+    embroideryHeightMm: Math.round(Number(embroideryHeight) * 10),
+  };
   const canGenerate = workspace?.available && frameMm !== undefined;
   const cannotStart = !canGenerate || busy || generationTask.busy || active || Boolean(loadError);
   const start = (event: FormEvent<HTMLFormElement>, previousFileId?: string) => {
     event.preventDefault();
     if (cannotStart) return;
-    if (!placementForm.current?.reportValidity()) return;
-    const data = new FormData(placementForm.current);
-    const placement = {
-      side,
-      panelWidthMm: millimetersInput(data, "panelWidth"),
-      panelHeightMm: millimetersInput(data, "panelHeight"),
-      embroideryWidthMm: millimetersInput(data, "embroideryWidth"),
-      embroideryHeightMm: millimetersInput(data, "embroideryHeight"),
-    };
+    if (!placementForm.current?.reportValidity() || !side || !selectedPosition) return;
+    const placement: Placement = { side, ...measurements, position: selectedPosition };
     const maxVariants = Number(new FormData(event.currentTarget).get("maxVariants"));
     setPublished(undefined);
     setGenerationFor(previousFileId);
@@ -132,13 +159,14 @@ export function AdminSketchGeneration({ order, path, publishedFileId, busy, onPu
       {canGenerate ? <form ref={placementForm} className={styles.generation} onSubmit={start}>
           <fieldset className={styles.placement} disabled={cannotStart}>
             <legend>Размещение вышивки</legend>
-            <p className="muted">Эскиз разместится в центре выбранной стороны. Для точного масштаба укажите замеры плоского участка ткани.</p>
+            <p className="muted">Укажите замеры плоского участка ткани. Положение рамки можно изменить на предпросмотре.</p>
             <label className={`field ${styles.garmentSide}`}>Сторона изделия
               <span className={styles.selectControl}>
                 <select name="side" value={side} required onChange={(event) => {
                   setSide(event.target.value as Side | "");
                   setPanelWidth("");
                   setPanelHeight("");
+                  setPosition(undefined);
                 }}>
                   <option value="" disabled>Выберите сторону</option>
                   <option value="FRONT">Перед</option><option value="BACK">Спинка</option>
@@ -158,13 +186,16 @@ export function AdminSketchGeneration({ order, path, publishedFileId, busy, onPu
                 <Measurement name="panelHeight" label="Высота панели, см" value={panelHeight} onChange={setPanelHeight} />
               </div>
               <div className={styles.measurementPair}>
-                <Measurement name="embroideryWidth" label="Ширина вышивки, см" mm={frameMm} maxMm={frameMm} />
-                <Measurement name="embroideryHeight" label="Высота вышивки, см" mm={frameMm} maxMm={frameMm} />
+                <Measurement name="embroideryWidth" label="Ширина вышивки, см" value={embroideryWidth} onChange={setEmbroideryWidth} maxMm={frameMm} />
+                <Measurement name="embroideryHeight" label="Высота вышивки, см" value={embroideryHeight} onChange={setEmbroideryHeight} maxMm={frameMm} />
               </div>
             </div>
+            {panel && selectedPosition && <SketchPlacementEditor src={`${path}/template?side=${side}`} panel={panel}
+              position={selectedPosition} measurements={measurements} onChange={setPosition} />}
+            {side && !panel && <Notice error>Для этой стороны и цвета нет заготовки.</Notice>}
             <div className={styles.generationForm}>
               <VariantLimit />
-              <button className="button solid">Сгенерировать эскиз</button>
+              <button className="button solid" disabled={Boolean(side && !panel)}>Сгенерировать эскиз</button>
             </div>
           </fieldset>
         </form> : <Notice>
@@ -235,12 +266,12 @@ export function AdminSketchGeneration({ order, path, publishedFileId, busy, onPu
   </section>;
 }
 
-function Measurement({ name, label, mm, maxMm = 9999, value, onChange }: {
-  name: string; label: string; mm?: number; maxMm?: number; value?: string; onChange?: (value: string) => void;
+function Measurement({ name, label, maxMm = 9999, value, onChange }: {
+  name: string; label: string; maxMm?: number; value: string; onChange: (value: string) => void;
 }) {
   return <label className="field">{label}
     <input name={name} type="number" min="0.1" max={maxMm / 10} step="0.1" value={value}
-      defaultValue={mm === undefined ? undefined : mm / 10} onChange={onChange ? (event) => onChange(event.target.value) : undefined} required />
+      onChange={(event) => onChange(event.currentTarget.value)} required />
   </label>;
 }
 

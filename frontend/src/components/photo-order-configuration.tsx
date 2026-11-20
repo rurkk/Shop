@@ -8,6 +8,7 @@ import styles from "./checkout.module.css";
 const garmentSizes = ["XS", "S", "M", "L", "XL", "XXL"];
 const colors = ["Чёрный", "Белый", "Молочный", "Серый", "Бордовый"];
 const frameDescriptions: Record<EmbroideryFrame, string> = {
+  MINI: "Компактный мотив для простых рисунков и силуэтов.",
   SMALL: "Компактная вышивка, как логотип. Подходит для простых рисунков.",
   STANDARD: "Стандартная вышивка. Подходит для рисунка с читаемым госномером.",
   LARGE: "Больше мелких деталей и теней. Рекомендуем вышивать на спинке.",
@@ -60,7 +61,7 @@ export function PhotoOrderConfiguration({ options }: { options: PhotoOrderOption
                 setThreePhotoBackground(false);
               }} />
             <span className={styles.optionText}>
-              <strong id={title}>{embroideryFrameLabel(option.sizeMm)}</strong>
+              <strong id={title}>{embroideryFrameLabel(option.frame, option.sizeMm)}</strong>
               <span id={`${title}-details`} className="muted">{frameDescriptions[option.frame]}</span>
             </span>
             {option.priceKopecks !== null && <strong className={styles.optionPrice}>{money(option.priceKopecks)}</strong>}

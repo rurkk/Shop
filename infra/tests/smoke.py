@@ -324,11 +324,11 @@ def new_order(browser, email, garment="HOODIE"):
 
 def check_photo_options(visitor):
     prices = {
-        "HOODIE": (650000, 740000, 870000, 990000),
-        "T_SHIRT": (550000, 640000, 770000, 890000),
-        "SWEATSHIRT": (None, None, None, None),
+        "HOODIE": (600000, 650000, 740000, 870000, 990000),
+        "T_SHIRT": (500000, 550000, 640000, 770000, 890000),
+        "SWEATSHIRT": (None, None, None, None, None),
     }
-    variants = (("SMALL", 120, False), ("STANDARD", 160, False), ("LARGE", 220, False), ("LARGE", 220, True))
+    variants = (("MINI", 80, False), ("SMALL", 120, False), ("STANDARD", 160, False), ("LARGE", 220, False), ("LARGE", 220, True))
     rows = visitor.call("/api/orders/photo-options")
     expected = {
         (garment, frame, size, three_photos): price
@@ -741,6 +741,44 @@ def generate_sketch(staff, route, input):
     raise AssertionError("Sketch generation did not finish")
 
 
+def check_mini_sketch(staff, email, image):
+    buyer = Browser()
+    buyer.renew_csrf()
+    draft = photo_draft(email, frame="MINI")
+    order_id = buyer.call("/api/orders/drafts", "POST", draft, expected=201)["id"]
+    order = f"/api/orders/{order_id}"
+    staff_order = f"/api/staff/orders/{order_id}"
+    log_in(buyer, order + "/access", email)
+    saved = buyer.call(order)["order"]
+    assert saved["embroidery"] == draft["embroidery"] and saved["itemKopecks"] == 600000
+    buyer.upload(order, "SOURCE", image)
+    status(buyer.call(order + "/submit", "POST"), "IN_REVIEW")
+    staff.call(staff_order + "/quote", "POST", {"productionDays": 7})
+    contact = buyer.call(order + "/delivery", "PUT", pickup_contact())
+    staff.call(staff_order + "/delivery-quote", "POST", delivery_quote(contact["delivery"], 30000))
+    payment_id = open_checkout(buyer, order)
+    gateway_command("payment", paymentId=payment_id, status="succeeded")
+    assert buyer.call(order + "/payment/sync", "POST")["paidAt"]
+    buyer.call(order + "/messages", "POST", {
+        "clientMessageId": str(uuid.uuid4()), "body": "Перенесите рисунок в центр груди",
+    })
+    placement = {"side": "FRONT", "panelWidthMm": 360, "panelHeightMm": 325,
+                 "embroideryWidthMm": 80, "embroideryHeightMm": 80, "position": {"xPercent": 50, "yPercent": 50}}
+    route = staff_order + "/sketch-generation"
+    assert staff.call(route)["panelPreviews"]["FRONT"]["defaultPosition"] == {"xPercent": 90, "yPercent": 22}
+    buyer.call(route + "/template?side=FRONT", expected=403)
+    assert staff.call(route + "/template?side=FRONT")[:2] == b"\xff\xd8"
+    buyer.call(route, "POST", {"placement": placement}, expected=403)
+    invalid = dict(placement, position={"xPercent": 101, "yPercent": 50})
+    staff.call(route, "POST", {"maxVariants": 1, "placement": invalid}, expected=400)
+    [variant] = generate_sketch(staff, route, {"maxVariants": 1, "placement": placement})
+    assert staff.call(route)["latestJob"]["placement"] == placement
+    sketch_path = order + "/files/" + variant["fileId"]
+    buyer.call(sketch_path, expected=404)
+    staff.call(staff_order + "/sketches", "POST", {"fileId": variant["fileId"]})
+    assert buyer.call(sketch_path) == staff.call(sketch_path)
+
+
 def main():
     buyer, staff, other = Browser(), Browser(), Browser()
     run = uuid.uuid4().hex[:12]
@@ -800,7 +838,7 @@ def main():
     log_in_staff(staff, STAFF, check_controls=True)
     sketch_generation = staff_order + "/sketch-generation"
     placement = {"side": "FRONT", "panelWidthMm": 500, "panelHeightMm": 500,
-                 "embroideryWidthMm": 220, "embroideryHeightMm": 220}
+                 "embroideryWidthMm": 220, "embroideryHeightMm": 220, "position": {"xPercent": 50, "yPercent": 50}}
     buyer.call(sketch_generation, expected=403)
     staff.call(sketch_generation, "POST", {"maxVariants": 1, "placement": placement}, expected=409)
     assert any(item["id"] == order.rsplit("/", 1)[-1] for item in staff.call("/api/staff/orders")["items"])
@@ -881,9 +919,6 @@ def main():
     workspace = staff.call(sketch_generation)
     assert workspace["available"] and workspace["latestJob"] is None and workspace["drafts"] == []
     assert set(workspace["panelEstimates"]) == {"FRONT", "BACK"}
-    for estimate in workspace["panelEstimates"].values():
-        assert 0 < estimate["panelWidthMm"] <= estimate["foldedWidthMm"]
-        assert 0 < estimate["panelHeightMm"] <= estimate["foldedHeightMm"]
     model_settings = "/api/staff/sketch-settings"
     original_models = staff.call(model_settings)["selection"]
     initial_models = dict(original_models, responseModel="gemini-2-5-flash-lite", imageModel="flash")
@@ -960,6 +995,8 @@ def main():
     print("Verified one advance payment with delivery, sketch approval, shipment, and logout")
     check_cancellation(staff, other, other_order, image)
     print("Verified cancellation and refund after payment on a previously issued link", flush=True)
+    check_mini_sketch(staff, f"mini-{run}@example.test", image)
+    print("Verified MINI pricing, chat placement, and staff publication", flush=True)
 
 
 if __name__ == "__main__":

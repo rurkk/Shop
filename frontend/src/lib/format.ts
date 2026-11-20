@@ -19,9 +19,11 @@ export function days(count: number) {
 }
 export const garmentLabels: Record<string, string> = { HOODIE: "Худи", T_SHIRT: "Футболка", SWEATSHIRT: "Свитшот" };
 export const garmentLabel = (garment: string) => garmentLabels[garment] ?? garment;
-export const embroideryFrameSizeMm: Record<EmbroideryFrame, number> = { SMALL: 120, STANDARD: 160, LARGE: 220 };
-export const embroideryFrameLabel = (sizeMm: number) => `${sizeMm / 10} × ${sizeMm / 10} см`;
-export const millimetersInput = (data: FormData, field: string) => Math.round(Number(data.get(field)) * 10);
+export const embroideryFrameSizeMm: Record<EmbroideryFrame, number> = { MINI: 80, SMALL: 120, STANDARD: 160, LARGE: 220 };
+export function embroideryFrameLabel(frame: EmbroideryFrame, sizeMm = embroideryFrameSizeMm[frame]) {
+  const size = `${sizeMm / 10} × ${sizeMm / 10} см`;
+  return frame === "MINI" ? `Мини-вышивка · до ${size}` : size;
+}
 export const typeLabels: Record<OrderType, string> = { CUSTOM_PHOTO: "По фото", CATALOG: "Из коллекции" };
 export const statusLabels: Record<OrderStatus, string> = {
   DRAFT: "Черновик", EXPIRED: "Срок черновика истёк", IN_REVIEW: "На рассмотрении",
