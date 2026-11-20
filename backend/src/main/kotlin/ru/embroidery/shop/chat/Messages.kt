@@ -84,6 +84,15 @@ class Messages(
         WHERE order_id = :order AND sequence_no > :sequence ORDER BY sequence_no LIMIT 100
     """).param("order", orderId).param("sequence", sequence).query(messageMapper).list()
 
+    internal fun lastSequence(orderId: UUID): Long = db.sql("""
+        SELECT coalesce(max(sequence_no), 0) FROM order_messages WHERE order_id = :order
+    """).param("order", orderId).query(Long::class.java).single()
+
+    internal fun through(orderId: UUID, sequence: Long, limit: Int): List<Message> = db.sql("""
+        SELECT * FROM order_messages WHERE order_id = :order AND sequence_no <= :sequence
+        ORDER BY sequence_no LIMIT :limit
+    """).param("order", orderId).param("sequence", sequence).param("limit", limit).query(messageMapper).list()
+
     @Transactional
     fun send(actor: Actor, orderId: UUID, input: NewMessage): Message {
         actor.requireOrder(orderId)

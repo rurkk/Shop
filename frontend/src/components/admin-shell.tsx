@@ -33,9 +33,10 @@ export function AdminShell({ children }: { children: ReactNode }) {
     <div className="admin-bar">
       <nav aria-label="Меню команды">{links.map(([path, title]) =>
         <Link key={path} href={path} aria-current={pathname === path || (path === "/admin" && pathname.startsWith("/admin/orders/")) ? "page" : undefined}>{title}</Link>
-      )}{session.value.canManageStaff &&
+      )}{session.value.canManageStaff && <>
+        <Link href="/admin/ai" aria-current={pathname === "/admin/ai" ? "page" : undefined}>Эскизы с ИИ</Link>
         <Link href="/admin/staff" aria-current={pathname === "/admin/staff" ? "page" : undefined}>Сотрудники</Link>
-      }</nav>
+      </>}</nav>
       <button type="button" className="text-link" disabled={task.busy} onClick={() => void task.run(async () => {
         await write("/api/session/logout", "POST");
         session.reload();

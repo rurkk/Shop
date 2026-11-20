@@ -1,0 +1,265 @@
+.page {
+  --order-surface: #f6f6f4;
+  --order-gap: clamp(14px, 2vw, 24px);
+  display: grid;
+  gap: var(--order-gap);
+  min-width: 0;
+}
+
+.back {
+  min-height: 44px;
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px 24px;
+}
+
+.header > [role="alert"] {
+  flex-basis: 100%;
+}
+
+.heading {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.heading h1 {
+  font-size: clamp(2rem, 4vw, 3.25rem);
+}
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+
+.stage {
+  border: 1px solid var(--line);
+  background: var(--order-surface);
+  padding: 6px 12px;
+  font-size: .86rem;
+  font-weight: 700;
+}
+
+.sections {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 20px;
+  border-block: 1px solid var(--line);
+}
+
+.sections a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  font-weight: 700;
+}
+
+.sections a:hover {
+  text-decoration: underline;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.85fr) minmax(280px, 1fr);
+  gap: var(--order-gap);
+  align-items: start;
+}
+
+.layout > :global(.stack) {
+  gap: var(--order-gap);
+}
+
+.layout :global(.panel) {
+  padding: clamp(16px, 2.2vw, 28px);
+}
+
+.layout h2 {
+  font-size: clamp(1.4rem, 2.1vw, 1.8rem);
+}
+
+.layout :global(.edit-block) {
+  padding-block: 0;
+}
+
+.layout :global(.edit-block) > summary {
+  padding-block: 12px;
+}
+
+.layout :global(.edit-block) > summary + * {
+  margin-top: 6px;
+}
+
+.generation {
+  container-type: inline-size;
+  display: grid;
+  gap: 14px;
+  padding: clamp(14px, 2vw, 20px);
+  background: var(--order-surface);
+}
+
+.generationForm {
+  display: grid;
+  grid-template-columns: minmax(0, 12rem) auto;
+  justify-content: start;
+  align-items: end;
+  gap: 12px;
+}
+
+.generationForm > :global(.button),
+.selectControl select {
+  width: 100%;
+  min-height: 46px;
+}
+
+.selectControl {
+  position: relative;
+  display: block;
+}
+
+.selectControl select {
+  appearance: none;
+  padding-right: 36px;
+}
+
+.selectControl::after {
+  position: absolute;
+  inset: 50% 15px auto auto;
+  width: 8px;
+  height: 8px;
+  border: solid currentColor;
+  border-width: 0 1.5px 1.5px 0;
+  content: "";
+  transform: translateY(-75%) rotate(45deg);
+  pointer-events: none;
+}
+
+.generationStatus:empty {
+  position: absolute;
+}
+
+.generationStatus p + p {
+  margin-top: 6px;
+}
+
+.variants {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
+
+.variant {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  min-width: 0;
+}
+
+.variantPreview {
+  display: block;
+  position: relative;
+  background: var(--order-surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.enlarge {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 4px 8px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  font-size: .78rem;
+  font-weight: 700;
+}
+
+.variantPreview:not(:disabled) {
+  cursor: zoom-in;
+}
+
+.variantPreview img,
+.variantPreview :global(.photo-error) {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  max-height: 290px;
+  object-fit: contain;
+}
+
+.variantBody {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+
+.variantTitle,
+.variantActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.variantTitle h3 {
+  font-size: 1.1rem;
+}
+
+.variantActions {
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.variantActions > :global(.button) {
+  max-width: 100%;
+}
+
+.published {
+  background: var(--order-surface);
+  padding: 3px 8px;
+  font-weight: 700;
+}
+
+.revision {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  padding-top: 12px;
+}
+
+.revision .selectControl {
+  max-width: 12rem;
+}
+
+.previewImage {
+  width: 100%;
+  max-height: 50dvh;
+  object-fit: contain;
+  background: var(--order-surface, #f6f6f4);
+}
+
+@container (width < 24rem) {
+  .generationForm {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 850px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 540px) {
+  .sections {
+    column-gap: 14px;
+  }
+}

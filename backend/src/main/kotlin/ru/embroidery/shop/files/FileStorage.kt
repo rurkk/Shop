@@ -81,6 +81,30 @@ class ImageStorage(private val s3: S3Client, settings: ShopSettings) {
         action(ValidatedImage(path, validateImage(path), Files.size(path)))
     }
 
+    internal fun <T> withGeneratedImage(bytes: ByteArray, action: (ValidatedImage) -> T): T {
+        if (bytes.size > MAX_IMAGE_BYTES) throw ApiFailure(HttpStatus.BAD_GATEWAY, "Generated image exceeds the file limit")
+        return withTempFile { path ->
+            Files.write(path, bytes)
+            action(ValidatedImage(path, validateImage(path), Files.size(path)))
+        }
+    }
+
+    internal fun readForGeneration(file: OrderFile): ByteArray = withTempFile { source ->
+        try {
+            s3.getObject { it.bucket(bucket).key(file.objectKey) }.use { input ->
+                Files.newOutputStream(source).use { output ->
+                    if (input.copyLimitedTo(output, MAX_IMAGE_BYTES + 1) != file.byteSize) {
+                        input.abort()
+                        throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "Order image could not be read")
+                    }
+                }
+            }
+        } catch (_: SdkException) {
+            throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "File storage is temporarily unavailable")
+        }
+        encodeCatalog(source) { image -> Files.readAllBytes(image.path) }
+    }
+
     fun <T> withCatalogUpload(part: MultipartFile, action: (ValidatedImage) -> T): T = withUpload(part) { path ->
         if (!catalogEncoder.tryAcquire(0, TimeUnit.SECONDS)) {
             throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "Catalog image processing is busy")

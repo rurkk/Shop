@@ -74,6 +74,11 @@ shop:
   code-secret: ${SHOP_CODE_SECRET}
   mail-from: ${SHOP_MAIL_FROM}
   public-origin: ${SHOP_PUBLIC_ORIGIN}
+  sketch:
+    genapi:
+      enabled: ${SHOP_SKETCH_GENAPI_ENABLED:false}
+      api-key: ${SHOP_SKETCH_GENAPI_API_KEY:}
+      test-stub: ${SHOP_SKETCH_GENAPI_TEST_STUB:false}
   yookassa:
     enabled: ${SHOP_YOOKASSA_ENABLED:false}
     shop-id: ${SHOP_YOOKASSA_SHOP_ID:}

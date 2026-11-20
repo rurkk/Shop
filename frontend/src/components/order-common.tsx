@@ -8,26 +8,26 @@ import { calendarDateLabel, dateLabel, days, garmentLabel, money, moscowDateTime
 import { useTask } from "@/lib/hooks";
 import { Failure, Icon, Picture } from "./ui";
 
-export function OrderHead({ details, staff, onRefresh, busy }: {
-  details: OrderDetails; staff?: boolean; onRefresh: () => void; busy: boolean;
+export function OrderHead({ details, onRefresh, busy }: {
+  details: OrderDetails; onRefresh: () => void; busy: boolean;
 }) {
   const { order, catalogItem, acceptance, delivery } = details;
   const task = useTask();
   const [copied, setCopied] = useState(false);
   let status = statusLabels[order.status];
-  if (!staff && order.status === "AWAITING_PAYMENT" && !acceptance) {
+  if (order.status === "AWAITING_PAYMENT" && !acceptance) {
     status = delivery?.offerValidThrough && delivery.deliverBy ? "Условия готовы" : "Условия уточняются";
   }
   return <header className="order-head">
-    <p className="eyebrow">{staff ? "Карточка заказа" : "Мой заказ"} / {typeLabels[order.type]}</p>
+    <p className="eyebrow">Мой заказ / {typeLabels[order.type]}</p>
     <h1>{catalogItem ? catalogItem.productName : "Вышивка по фото"}</h1>
     <div className="actions"><span className="badge" role="status">{status}</span><time className="muted" dateTime={order.createdAt}>{dateLabel(order.createdAt)}</time></div>
     <div className="actions">
       <span className="order-number">{order.id}</span>
-      {!staff && <button type="button" className="text-link" disabled={task.busy} onClick={() => void task.run(async () => {
+      <button type="button" className="text-link" disabled={task.busy} onClick={() => void task.run(async () => {
         await navigator.clipboard.writeText(window.location.href);
         setCopied(true);
-      })}><Icon name="link" /> {copied ? "Ссылка скопирована" : "Скопировать ссылку"}</button>}
+      })}><Icon name="link" /> {copied ? "Ссылка скопирована" : "Скопировать ссылку"}</button>
     </div>
     <Failure error={task.error} />
     <button type="button" className="text-link" onClick={onRefresh} disabled={busy}>Обновить заказ</button>
@@ -43,12 +43,12 @@ export function OrderAmounts({ details, showDelivery = true }: { details: OrderD
   </dl>;
 }
 
-export function OrderSummary({ details, showAmounts = true, showTracking = true, showDeliveryDays = true, showProductionDays = true, showAcceptance = true }: {
+export function OrderSummary({ details, sectionId, showAmounts = true, showTracking = true, showDeliveryDays = true, showProductionDays = true, showAcceptance = true }: {
   details: OrderDetails; showAmounts?: boolean; showTracking?: boolean; showDeliveryDays?: boolean; showProductionDays?: boolean;
-  showAcceptance?: boolean;
+  showAcceptance?: boolean; sectionId?: string;
 }) {
   const { order, catalogItem, delivery, payment, acceptance } = details;
-  return <section className="panel stack" aria-label="Детали заказа">
+  return <section id={sectionId} className="panel stack" aria-label="Детали заказа">
     <h2>Детали заказа</h2>
     <dl className="order-facts">
       <div><dt>Изделие</dt><dd>{garmentLabel(order.garment)}</dd></div>

@@ -335,6 +335,31 @@ test("покупатель и менеджер проводят заказ от 
 
   const staff = await staffPage(browser, baseURL!, info.project.name);
   try {
+    if (mobile) {
+      await staff.getByRole("link", { name: "Эскизы с ИИ", exact: true }).click();
+      const responseModel = staff.getByLabel("Модель для разбора переписки");
+      const imageModel = staff.getByLabel("Модель для генерации и правок");
+      await responseModel.selectOption("gemini-3-1-flash-lite");
+      await imageModel.selectOption("standard");
+      const prompt = staff.getByLabel("Системный промпт");
+      await prompt.fill("Подготовь эскиз с чёткими контурами.");
+      const examples = staff.getByLabel("Добавить примеры");
+      await examples.setInputFiles([{
+        name: "coupe-detail.jpg", mimeType: "image/jpeg", buffer: readFileSync(image("coupe-detail")),
+      }, {
+        name: "materials.txt", mimeType: "text/plain", buffer: Buffer.from("Хлопковая нить, два цвета."),
+      }]);
+      const save = staff.getByRole("button", { name: "Сохранить настройки" });
+      if (await save.isEnabled()) {
+        await save.click();
+        await expect(staff.getByText("Настройки эскизов сохранены.")).toBeVisible();
+      }
+      await staff.reload();
+      await expect(responseModel).toHaveValue("gemini-3-1-flash-lite");
+      await expect(imageModel).toHaveValue("standard");
+      await expect(prompt).toHaveValue("Подготовь эскиз с чёткими контурами.");
+      await expect(staff.getByRole("link", { name: "materials.txt" })).toBeVisible();
+    }
     await openStaffOrder(staff, email, mobile ? "CUSTOM_PHOTO" : "CATALOG");
     if (mobile) {
       const quote = staff.locator("details").filter({ has: staff.getByText("Оценить изделие", { exact: true }) });
@@ -372,7 +397,7 @@ test("покупатель и менеджер проводят заказ от 
       const href = await page.getByRole("link", { name: "Открыть вложение" }).getAttribute("href");
       expect((await page.request.get(href!)).headers()["content-type"]).toBe("image/jpeg");
       await staff.getByRole("button", { name: "Обновить заказ" }).click();
-      const sketch = staff.locator("details").filter({ has: staff.getByText("Опубликовать эскиз", { exact: true }) });
+      const sketch = staff.locator("details").filter({ has: staff.getByText("Загрузить свой эскиз", { exact: true }) });
       async function publish(name: string) {
         const summary = sketch.locator("summary");
         if (!await sketch.evaluate((node: HTMLDetailsElement) => node.open)) await summary.click();
@@ -385,7 +410,39 @@ test("покупатель и менеджер проводят заказ от 
       await page.getByRole("button", { name: "Запросить правки" }).click();
       await expect(page.getByText("Правки к эскизу", { exact: true })).toBeVisible();
       await staff.getByRole("button", { name: "Обновить заказ" }).click();
-      await publish("hero");
+      const generation = staff.getByRole("region", { name: "Эскизы с ИИ" });
+      await staff.getByRole("navigation", { name: "Разделы заказа" }).getByRole("link", { name: "Эскизы заказа" }).click();
+      await expect(generation.getByRole("heading", { name: "Эскизы с ИИ" })).toBeInViewport();
+      const variantLimit = generation.getByLabel("Максимум вариантов");
+      const generate = generation.getByRole("button", { name: "Сгенерировать эскиз", exact: true });
+      await variantLimit.selectOption("2");
+      const narrow = staff.viewportSize()!;
+      const mobileField = (await variantLimit.boundingBox())!;
+      const mobileButton = (await generate.boundingBox())!;
+      expect(mobileButton.y).toBeGreaterThanOrEqual(mobileField.y + mobileField.height);
+      expect(mobileButton.width).toBeCloseTo(mobileField.width, 0);
+      await staff.setViewportSize({ width: 1440, height: 1000 });
+      const desktopField = (await variantLimit.boundingBox())!;
+      const desktopButton = (await generate.boundingBox())!;
+      expect(desktopButton.y).toBeCloseTo(desktopField.y, 0);
+      expect(desktopButton.height).toBeCloseTo(desktopField.height, 0);
+      expect(desktopButton.x).toBeGreaterThan(desktopField.x);
+      await staff.setViewportSize(narrow);
+      await generate.click();
+      const drafts = generation.getByRole("article");
+      await expect(drafts).toHaveCount(2);
+      await expect(drafts.nth(1).getByRole("img")).toBeVisible();
+      await drafts.nth(1).getByRole("button", { name: "Внести правки" }).click();
+      const feedback = drafts.nth(1).getByRole("textbox", { name: "Замечания к эскизу" });
+      await expect(feedback).toBeFocused();
+      await expect(drafts.nth(1).getByLabel("Максимум вариантов")).toHaveValue("1");
+      await feedback.fill("Оставьте только контур");
+      await drafts.nth(1).getByRole("button", { name: "Сгенерировать с правками" }).click();
+      await expect(drafts).toHaveCount(3);
+      await drafts.first().getByRole("button", { name: "Опубликовать покупателю" }).click();
+      const publication = staff.getByRole("dialog", { name: "Публикация эскиза" });
+      await expect(publication.getByRole("img")).toBeVisible();
+      await publication.getByRole("button", { name: "Подтвердить публикацию" }).click();
       await expect(staff.getByRole("heading", { name: "Эскиз · версия 2" })).toBeVisible();
       await page.getByRole("button", { name: "Обновить заказ" }).click();
       await expect(page.getByRole("heading", { name: "Эскиз · версия 2" })).toBeVisible();

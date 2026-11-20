@@ -4,11 +4,13 @@ import Link from "next/link";
 import { useRef, useState, type ReactNode } from "react";
 import { imageAccept, read, upload, write } from "@/lib/api";
 import type { OrderDetails, OrderEvent, OrderStatus, Page } from "@/lib/contracts";
-import { dateLabel, days, historyLabels, money, rublesToKopecks } from "@/lib/format";
+import { dateLabel, days, historyLabels, money, rublesToKopecks, statusLabels, typeLabels } from "@/lib/format";
 import { useResource, useTask } from "@/lib/hooks";
-import { DeliverySummary, OrderFiles, OrderHead, OrderSummary, SketchImage } from "./order-common";
+import { DeliverySummary, OrderFiles, OrderSummary, SketchImage } from "./order-common";
 import { OrderChat } from "./order-chat";
+import { AdminSketchGeneration } from "./admin-sketch-generation";
 import { Failure, Icon, Modal, Notice, Pagination, Pending } from "./ui";
+import styles from "./admin-order.module.css";
 
 const cancelStages: OrderStatus[] = [
   "IN_REVIEW", "AWAITING_DELIVERY_QUOTE", "AWAITING_PAYMENT", "PREPARING_SKETCH", "SKETCH_REVIEW", "CHANGES_REQUESTED",
@@ -19,12 +21,12 @@ const amountPattern = "[0-9]+([.,][0-9]{1,2})?";
 export function AdminOrder({ id }: { id: string }) {
   const path = `/api/staff/orders/${id}`;
   const resource = useResource<OrderDetails>(path);
-  return <>
-    <Link href="/admin" className="text-link"><Icon name="back" /> К очереди</Link>
+  return <div className={styles.page}>
+    <Link href="/admin" className={`text-link ${styles.back}`}><Icon name="back" /> К заказам</Link>
     <Failure error={resource.error} retry={resource.reload} />
     {resource.loading && <Pending>Загружаем заказ…</Pending>}
     {resource.value && <WorkOrder path={path} initial={resource.value} />}
-  </>;
+  </div>;
 }
 
 function WorkOrder({ path, initial }: { path: string; initial: OrderDetails }) {
@@ -33,6 +35,8 @@ function WorkOrder({ path, initial }: { path: string; initial: OrderDetails }) {
   const [refundPrompt, setRefundPrompt] = useState(false);
   const sketchUpload = useRef<{ file: File; id: string }>(null);
   const task = useTask();
+  const refreshTask = useTask();
+  const uploadTask = useTask();
   const { order, delivery, payment } = details;
   const publicPath = `/api/orders/${order.id}`;
 
@@ -46,23 +50,78 @@ function WorkOrder({ path, initial }: { path: string; initial: OrderDetails }) {
   const canPublish = order.type === "CUSTOM_PHOTO" && ["PREPARING_SKETCH", "CHANGES_REQUESTED", "SKETCH_REVIEW"].includes(order.status);
   const canRefund = (order.status === "CANCELLATION_REQUESTED" || order.status === "SHIPPED")
     && payment?.paidAt && (!payment.refund || ["CANCELED", "CREATING"].includes(payment.refund.status));
+  const hasSourcePhotos = details.sourceFileIds.length > 0;
+  const hasSketchPanel = canPublish || Boolean(details.sketch);
+  const busy = task.busy || uploadTask.busy || refreshTask.busy;
+  const hasPaymentActions = Boolean(payment?.checkoutStatus || canRefund ||
+    order.status === "CANCELLATION_REQUESTED" || cancelStages.includes(order.status));
 
   return <>
-    <OrderHead details={details} staff busy={task.busy} onRefresh={() => void task.run(refresh)} />
-    <Failure error={task.error} />
+    <header className={styles.header}>
+      <div className={styles.heading}>
+        <p className="muted">{details.catalogItem && `${typeLabels[order.type]} · `}<time dateTime={order.createdAt}>{dateLabel(order.createdAt)}</time></p>
+        <h1>{details.catalogItem ? details.catalogItem.productName : "Вышивка по фото"}</h1>
+        <p className="order-number">{order.id}</p>
+      </div>
+      <div className={styles.headerActions}>
+        <span className={styles.stage} role="status">{statusLabels[order.status]}</span>
+        <button type="button" className="button outline" disabled={busy} onClick={() => void refreshTask.run(refresh)}>
+          {refreshTask.busy ? "Обновляем…" : "Обновить заказ"}
+        </button>
+      </div>
+      <Failure error={refreshTask.error} />
+    </header>
+    <nav className={styles.sections} aria-label="Разделы заказа">
+      {canPublish && <a href="#sketch-generation">Эскизы заказа</a>}
+      {hasSketchPanel && <a href="#published-sketch">Эскиз для покупателя</a>}
+      {hasSourcePhotos && <a href="#source-photos">Исходные фото</a>}
+      <a href="#order-actions">Действия</a>
+      <a href="#order-chat">Переписка</a>
+      <a href="#order-details">Детали заказа</a>
+      <a href="#order-history">История</a>
+    </nav>
     {order.rejectionReason && <Notice>Причина отказа: {order.rejectionReason}</Notice>}
     {order.cancellationReason && <Notice>Причина отмены: {order.cancellationReason}</Notice>}
-    <div className="order-layout">
+    <div className={styles.layout}>
       <div className="stack">
-        <section className="panel stack">
+        {canPublish && <AdminSketchGeneration orderId={order.id} path={`${path}/sketch-generation`}
+          publishedFileId={details.sketch?.fileId} busy={busy} onPublish={(fileId) => command("/sketches", { fileId })} />}
+        {hasSketchPanel && <section id="published-sketch" className="panel stack">
+          {details.sketch ? <SketchImage details={details} /> : <>
+            <h2>Эскиз для покупателя</h2>
+            <p className="muted">Покупатель увидит эскиз после публикации.</p>
+          </>}
+          <Failure error={uploadTask.error} />
+          {canPublish && <CommandForm title="Загрузить свой эскиз" busy={busy} onSubmit={(data) => uploadTask.run(async () => {
+            const file = data.get("file");
+            if (!(file instanceof File) || !file.size) throw new Error("Выберите файл эскиза.");
+            if (sketchUpload.current?.file.name !== file.name || sketchUpload.current.file.lastModified !== file.lastModified || sketchUpload.current.file.size !== file.size) {
+              const uploaded = await upload<{ id: string }>(publicPath + "/files?purpose=SKETCH", file);
+              sketchUpload.current = { file, id: uploaded.id };
+            }
+            await command("/sketches", { fileId: sketchUpload.current.id });
+            sketchUpload.current = null;
+          })} label={uploadTask.busy ? "Публикуем…" : "Опубликовать эскиз"}>
+            <label className="field">Файл эскиза <span className="optional">JPG или PNG, до 10 МиБ</span><input key={details.sketch?.id ?? "new"} type="file" name="file" accept={imageAccept} required /></label>
+          </CommandForm>}
+        </section>}
+        <section id="order-actions" className="panel stack">
           <h2>Действия по заказу</h2>
+          <Failure error={task.error} />
           {order.type === "CUSTOM_PHOTO" && order.status === "IN_REVIEW" &&
-            <CommandForm title="Оценить изделие" busy={task.busy} onSubmit={(data) => task.run(() => command("/quote", {
-              itemKopecks: rublesToKopecks(String(data.get("price"))), productionDays: Number(data.get("days")),
-            }))} label="Сохранить оценку">
-              <div className="field-row"><AmountField label="Цена изделия, ₽" /><DaysField label="Срок изготовления, дни" /></div>
+            <CommandForm title="Оценить изделие" busy={busy} onSubmit={(data) => task.run(() => {
+              const productionDays = Number(data.get("days"));
+              return command("/quote", order.itemKopecks === null
+                ? { itemKopecks: rublesToKopecks(String(data.get("price"))), productionDays }
+                : { productionDays });
+            })} label="Сохранить оценку">
+              {order.itemKopecks !== null && <p>Цена по конфигурации — {money(order.itemKopecks)}.</p>}
+              <div className="field-row">
+                {order.itemKopecks === null && <AmountField label="Цена изделия, ₽" />}
+                <DaysField label="Срок изготовления, дни" />
+              </div>
             </CommandForm>}
-          {canQuoteDelivery && (delivery ? <CommandForm key={delivery.version} title="Рассчитать доставку СДЭК" busy={task.busy}
+          {canQuoteDelivery && (delivery ? <CommandForm key={delivery.version} title="Рассчитать доставку СДЭК" busy={busy}
             onSubmit={(data) => task.run(async () => {
               const offerValidThrough = String(data.get("offerValidThrough"));
               const deliverBy = String(data.get("deliverBy"));
@@ -82,48 +141,40 @@ function WorkOrder({ path, initial }: { path: string; initial: OrderDetails }) {
             </div>
             <p className="muted">Даты по Москве, включительно. При расчёте срока передачи учтите {order.type === "CUSTOM_PHOTO" ? "подготовку и согласование эскиза, вышивку и доставку" : "подготовку изделия и доставку"}.</p>
           </CommandForm> : <p className="muted">Покупатель ещё не указал получателя и пункт выдачи.</p>)}
-          {canPublish && <CommandForm title="Опубликовать эскиз" busy={task.busy} onSubmit={(data) => task.run(async () => {
-            const file = data.get("file");
-            if (!(file instanceof File) || !file.size) throw new Error("Выберите файл эскиза.");
-            if (sketchUpload.current?.file.name !== file.name || sketchUpload.current.file.lastModified !== file.lastModified || sketchUpload.current.file.size !== file.size) {
-              const uploaded = await upload<{ id: string }>(publicPath + "/files?purpose=SKETCH", file);
-              sketchUpload.current = { file, id: uploaded.id };
-            }
-            await command("/sketches", { fileId: sketchUpload.current.id });
-            sketchUpload.current = null;
-          })} label="Опубликовать эскиз">
-            <label className="field">Файл эскиза <span className="optional">JPG или PNG, до 10 МиБ</span><input key={details.sketch?.id ?? "new"} type="file" name="file" accept={imageAccept} required /></label>
-          </CommandForm>}
           {["IN_PRODUCTION", "PREPARING_ORDER"].includes(order.status) &&
-            <button type="button" className="button solid" disabled={task.busy} onClick={() => void task.run(() => command("/production-complete"))}>Отметить готовность</button>}
-          {order.status === "READY_TO_SHIP" && <CommandForm title="Отправка" busy={task.busy} onSubmit={(data) => task.run(() => command("/shipment", {
+            <button type="button" className="button solid" disabled={busy} onClick={() => void task.run(() => command("/production-complete"))}>Отметить готовность</button>}
+          {order.status === "READY_TO_SHIP" && <CommandForm title="Отправка" busy={busy} onSubmit={(data) => task.run(() => command("/shipment", {
             trackingNumber: String(data.get("trackingNumber")).trim(),
           }))} label="Отметить отправку">
             <label className="field">Трек-номер СДЭК <input name="trackingNumber" required maxLength={120} /></label>
           </CommandForm>}
-          {payment?.checkoutStatus && <button type="button" className="button outline" disabled={task.busy} onClick={() => void task.run(async () => {
-            await write(publicPath + "/payment/sync", "POST");
-            await refresh();
-          })}>Сверить оплату и возврат</button>}
-          {order.status === "IN_REVIEW" && <ReasonForm title="Отклонить заявку" label="Отклонить заявку" busy={task.busy}
-            onSubmit={(reason) => task.run(() => command("/reject", { reason }))} />}
-          {cancelStages.includes(order.status) && <ReasonForm title="Отменить заказ" label="Начать отмену" busy={task.busy}
-            onSubmit={(reason) => task.run(() => command("/cancel", { reason }))} />}
-          {canRefund && <button type="button" className="button outline" disabled={task.busy} onClick={() => setRefundPrompt(true)}>Оформить полный возврат</button>}
-          {order.status === "CANCELLATION_REQUESTED" && !payment?.paidAt && <p className="muted">Заказ ждёт результата выданной ссылки на оплату. Сверьте её состояние.</p>}
-          {["SHIPPED", "REJECTED", "CANCELLED"].includes(order.status) && !payment?.checkoutStatus && <p className="muted">По заказу нет ожидающих действий.</p>}
+          {hasPaymentActions && <details className="edit-block">
+            <summary>Оплата и отмена</summary>
+            <div className="stack">
+              {payment?.checkoutStatus && <button type="button" className="button outline" disabled={busy} onClick={() => void task.run(async () => {
+                await write(publicPath + "/payment/sync", "POST");
+                await refresh();
+              })}>Сверить оплату и возврат</button>}
+              {order.status === "IN_REVIEW" && <ReasonForm title="Отклонить заявку" label="Отклонить заявку" busy={busy}
+                onSubmit={(reason) => task.run(() => command("/reject", { reason }))} />}
+              {cancelStages.includes(order.status) && <ReasonForm title="Отменить заказ" label="Начать отмену" busy={busy}
+                onSubmit={(reason) => task.run(() => command("/cancel", { reason }))} />}
+              {canRefund && <button type="button" className="button outline" disabled={busy} onClick={() => setRefundPrompt(true)}>Оформить полный возврат</button>}
+              {order.status === "CANCELLATION_REQUESTED" && !payment?.paidAt && <p className="muted">Заказ ждёт результата выданной ссылки на оплату. Сверьте её состояние.</p>}
+            </div>
+          </details>}
+          {["SHIPPED", "REJECTED", "CANCELLED"].includes(order.status) && !hasPaymentActions && <p className="muted">По заказу нет ожидающих действий.</p>}
         </section>
-        {details.sketch && <section className="panel stack"><SketchImage details={details} /></section>}
-        <OrderChat id={order.id} role="STAFF" />
+        <OrderChat id={order.id} role="STAFF" sectionId="order-chat" />
       </div>
       <aside className="stack">
-        <OrderSummary details={details} />
+        {hasSourcePhotos && <section id="source-photos" className="panel stack"><h2>Исходные фото</h2><OrderFiles orderId={order.id} ids={details.sourceFileIds} /></section>}
+        <OrderSummary details={details} sectionId="order-details" />
         <DeliverySummary details={details} />
-        {details.sourceFileIds.length > 0 && <section className="panel stack"><h2>Исходные фото</h2><OrderFiles orderId={order.id} ids={details.sourceFileIds} /></section>}
         <History key={version} path={path} />
       </aside>
     </div>
-    {refundPrompt && payment && <Modal title="Подтвердите полный возврат" onClose={() => { if (!task.busy) setRefundPrompt(false); }}>
+    {refundPrompt && payment && <Modal title="Подтвердите полный возврат" closeDisabled={task.busy} onClose={() => setRefundPrompt(false)}>
       <div className="stack">
         <h2>Полный возврат</h2>
         <p>Вернуть покупателю {money(payment.amountKopecks)}?</p>
@@ -165,7 +216,7 @@ function DaysField({ label }: { label: string }) {
 function History({ path }: { path: string }) {
   const [page, setPage] = useState(0);
   const result = useResource<Page<OrderEvent>>(`${path}/history?page=${page}`);
-  return <section className="panel stack">
+  return <section id="order-history" className="panel stack">
     <h2>История</h2>
     {result.loading && <Pending />}
     <Failure error={result.error} retry={result.reload} />

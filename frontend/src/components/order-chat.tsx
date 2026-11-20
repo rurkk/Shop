@@ -13,10 +13,10 @@ function merge(messages: Message[], newMessages: Message[]) {
     .sort((a, b) => a.sequence - b.sequence);
 }
 
-export function OrderChat({ id, role }: { id: string; role: Message["senderRole"] }) {
+export function OrderChat({ id, role, sectionId }: { id: string; role: Message["senderRole"]; sectionId?: string }) {
   const path = `/api/orders/${id}/messages`;
   const history = useResource<MessageHistory>(path);
-  return <section className="panel stack" aria-label="Переписка">
+  return <section id={sectionId} className="panel stack" aria-label="Переписка">
     <h2>Переписка</h2>
     {history.loading && <Pending>Загружаем сообщения…</Pending>}
     <Failure error={history.error} retry={history.reload} />

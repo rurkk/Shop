@@ -91,7 +91,8 @@ class SecurityConfiguration {
                 "/api/orders/*/access/code", "/api/orders/*/access/verify",
                 "/api/staff/access/code", "/api/staff/access/verify", "/api/payments/yookassa/webhook"
             ).permitAll()
-            it.requestMatchers("/api/staff/accounts", "/api/staff/accounts/**").hasAuthority("MANAGE_STAFF")
+            it.requestMatchers("/api/staff/accounts", "/api/staff/accounts/**", "/api/staff/sketch-settings", "/api/staff/sketch-settings/**")
+                .hasAuthority("MANAGE_STAFF")
             it.requestMatchers("/api/staff/**").hasRole("STAFF")
             it.requestMatchers("/api/orders/**").hasAnyRole("CUSTOMER", "STAFF")
             it.anyRequest().denyAll()
