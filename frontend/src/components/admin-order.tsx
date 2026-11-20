@@ -84,7 +84,7 @@ function WorkOrder({ path, initial }: { path: string; initial: OrderDetails }) {
     {order.cancellationReason && <Notice>Причина отмены: {order.cancellationReason}</Notice>}
     <div className={styles.layout}>
       <div className="stack">
-        {canPublish && <AdminSketchGeneration orderId={order.id} path={`${path}/sketch-generation`}
+        {canPublish && <AdminSketchGeneration order={order} path={`${path}/sketch-generation`}
           publishedFileId={details.sketch?.fileId} busy={busy} onPublish={(fileId) => command("/sketches", { fileId })} />}
         {hasSketchPanel && <section id="published-sketch" className="panel stack">
           {details.sketch ? <SketchImage details={details} /> : <>

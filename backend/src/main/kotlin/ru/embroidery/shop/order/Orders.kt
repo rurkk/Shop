@@ -33,9 +33,13 @@ class Orders(
     private val history: OrderHistory,
     private val mail: ShopMail
 ) {
-    fun createDraft(input: NewDraft) = DraftCreated(
-        orders.createCustomDraft(normalizedEmail(input.email), input)
-    )
+    fun createDraft(input: NewDraft): DraftCreated {
+        val embroidery = input.embroidery
+        val option = photoOrderOptions.firstOrNull {
+            it.garment == input.garment && it.frame == embroidery.frame && it.threePhotoBackground == embroidery.threePhotoBackground
+        } ?: badRequest("Three-photo background requires the 22 cm frame")
+        return DraftCreated(orders.createCustomDraft(normalizedEmail(input.email), input, option.priceKopecks))
+    }
 
     @Transactional
     fun createCatalogDraft(input: NewCatalogDraft): DraftCreated {
@@ -70,8 +74,13 @@ class Orders(
         val order = orders.lock(id)
         if (order.status == OrderStatus.IN_REVIEW) return snapshot(id)
         order.requireStatus(OrderStatus.DRAFT)
-        if (order.type == OrderType.CUSTOM_PHOTO && orders.sources(id).isEmpty()) {
-            conflict("Upload a source photo before submitting")
+        if (order.type == OrderType.CUSTOM_PHOTO) {
+            val embroidery = order.requireEmbroidery()
+            val photoCount = orders.sources(id).size
+            if (embroidery.threePhotoBackground && photoCount != BACKGROUND_PHOTO_COUNT) {
+                conflict("Upload exactly three source photos for this background")
+            }
+            if (photoCount == 0) conflict("Upload a source photo before submitting")
         }
         orders.setStatus(id, OrderStatus.IN_REVIEW)
         mail.notifyCustomer(id, order.email, "Заявка получена", "Команда проверит заявку и напишет вам. Следите за статусом в карточке заказа.")
@@ -83,9 +92,13 @@ class Orders(
         val order = orders.lock(id)
         order.requireType(OrderType.CUSTOM_PHOTO)
         order.requireStatus(OrderStatus.IN_REVIEW)
-        orders.setQuote(id, quote)
+        order.requireEmbroidery()
+        val fixedPrice = order.itemKopecks
+        if (fixedPrice != null && quote.itemKopecks != null) badRequest("The selected embroidery price is already fixed")
+        val price = fixedPrice ?: quote.itemKopecks ?: badRequest("Enter an item price for this order")
+        orders.setQuote(id, price, quote.productionDays)
         history.record(id, OrderAction.QUOTED, actor.email,
-            mapOf("itemKopecks" to quote.itemKopecks, "productionDays" to quote.productionDays))
+            mapOf("itemKopecks" to price, "productionDays" to quote.productionDays))
         mail.notifyCustomer(id, order.email, "Цена и срок заказа готовы", "Посмотрите оценку вышивки и укажите пункт выдачи СДЭК в карточке заказа.")
         return snapshot(id)
     }
@@ -230,6 +243,9 @@ class Orders(
 
 @RestController
 class OrderController(private val orders: Orders) {
+    @GetMapping("/api/orders/photo-options")
+    fun photoOptions(): List<PhotoOrderOption> = photoOrderOptions
+
     @PostMapping("/api/orders/drafts")
     @ResponseStatus(HttpStatus.CREATED)
     fun create(@Valid @RequestBody input: NewDraft) = orders.createDraft(input)

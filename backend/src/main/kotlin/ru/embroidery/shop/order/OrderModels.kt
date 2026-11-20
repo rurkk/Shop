@@ -28,7 +28,8 @@ data class NewDraft(
     val garment: Garment,
     @field:NotBlank @field:Size(max = 24) val size: String,
     @field:NotBlank @field:Size(max = 80) val color: String,
-    @field:Size(max = 2000) val description: String = ""
+    val embroidery: EmbroideryConfiguration,
+    @field:Size(max = 2000) val description: String = "",
 )
 
 data class NewCatalogDraft(
@@ -41,7 +42,7 @@ data class NewCatalogDraft(
 data class DraftCreated(val id: UUID)
 
 data class Quote(
-    @field:Min(1) @field:Max(MAX_KOPECKS) val itemKopecks: Long,
+    @field:Min(1) @field:Max(MAX_KOPECKS) val itemKopecks: Long? = null,
     @field:Positive val productionDays: Int,
 )
 
@@ -63,7 +64,8 @@ data class Order(
     val trackingNumber: String?,
     val rejectionReason: String?,
     val cancellationReason: String?,
-    val createdAt: OffsetDateTime
+    val createdAt: OffsetDateTime,
+    val embroidery: EmbroideryConfiguration? = null,
 ) {
     fun requireStatus(vararg allowed: OrderStatus) {
         if (status !in allowed) conflict("Action is unavailable at the current order stage")
@@ -72,6 +74,8 @@ data class Order(
     fun requireType(expected: OrderType) {
         if (type != expected) conflict("Action is unavailable for this order type")
     }
+
+    internal fun requireEmbroidery() = embroidery ?: conflict("Embroidery configuration is missing")
 }
 
 data class CatalogOrderItem(

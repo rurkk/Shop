@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from "react";
 import { filePath, read, write } from "@/lib/api";
+import type { Order } from "@/lib/contracts";
+import { embroideryFrameSizeMm, millimetersInput } from "@/lib/format";
 import { useTask } from "@/lib/hooks";
 import { Failure, Modal, Notice, Pending, Picture } from "./ui";
 import styles from "./admin-order.module.css";
@@ -20,8 +22,8 @@ const failureLabels: Record<string, string> = {
   GENERATION_FAILED: "Не удалось получить эскиз. Попробуйте ещё раз.",
 };
 
-export function AdminSketchGeneration({ orderId, path, publishedFileId, busy, onPublish }: {
-  orderId: string; path: string; publishedFileId?: string; busy: boolean;
+export function AdminSketchGeneration({ order, path, publishedFileId, busy, onPublish }: {
+  order: Order; path: string; publishedFileId?: string; busy: boolean;
   onPublish: (fileId: string) => Promise<unknown>;
 }) {
   const [workspace, setWorkspace] = useState<Workspace>();
@@ -35,6 +37,7 @@ export function AdminSketchGeneration({ orderId, path, publishedFileId, busy, on
   const generationStatus = useRef<HTMLDivElement>(null);
   const revisionInput = useRef<HTMLTextAreaElement>(null);
   const revisionTrigger = useRef<HTMLButtonElement>(null);
+  const placementForm = useRef<HTMLFormElement>(null);
   const generationTask = useTask();
 
   useEffect(() => {
@@ -69,18 +72,29 @@ export function AdminSketchGeneration({ orderId, path, publishedFileId, busy, on
   const reload = () => setRefresh((value) => value + 1);
   const latestJob = workspace?.latestJob;
   const active = isActive(latestJob) && workspace?.available;
-  const cannotStart = busy || generationTask.busy || active || Boolean(loadError);
+  const frameMm = order.embroidery ? embroideryFrameSizeMm[order.embroidery.frame] : undefined;
+  const canGenerate = workspace?.available && frameMm !== undefined;
+  const cannotStart = !canGenerate || busy || generationTask.busy || active || Boolean(loadError);
   const start = (event: FormEvent<HTMLFormElement>, previousFileId?: string) => {
     event.preventDefault();
-    if (cannotStart || !workspace?.available) return;
+    if (cannotStart) return;
+    if (!placementForm.current?.reportValidity()) return;
+    const data = new FormData(placementForm.current);
+    const placement = {
+      side: data.get("side"),
+      panelWidthMm: millimetersInput(data, "panelWidth"),
+      panelHeightMm: millimetersInput(data, "panelHeight"),
+      embroideryWidthMm: millimetersInput(data, "embroideryWidth"),
+      embroideryHeightMm: millimetersInput(data, "embroideryHeight"),
+    };
     const maxVariants = Number(new FormData(event.currentTarget).get("maxVariants"));
     setPublished(undefined);
     setGenerationFor(previousFileId);
     void generationTask.run(async () => {
       try {
         const job = await write<Job>(path, "POST", previousFileId
-          ? { maxVariants, previousFileId, feedback: feedback.trim() }
-          : { maxVariants });
+          ? { maxVariants, placement, previousFileId, feedback: feedback.trim() }
+          : { maxVariants, placement });
         setWorkspace((current) => current && { ...current, latestJob: job });
         if (previousFileId) {
           setRevisionId(undefined);
@@ -109,15 +123,37 @@ export function AdminSketchGeneration({ orderId, path, publishedFileId, busy, on
     {!generationFor && <Failure error={generationTask.error} />}
     {!workspace && !loadError && <Pending>Загружаем эскизы…</Pending>}
     {workspace && <>
-      {workspace.available ? <div className={styles.generation}>
-        <p className="muted">ИИ использует исходные фото, пожелания и переписку по заказу.</p>
-        <form className={styles.generationForm} onSubmit={start}>
-          <VariantLimit disabled={cannotStart} />
-          <button className="button solid" disabled={cannotStart}>Сгенерировать эскиз</button>
-        </form>
-      </div> : <Notice>
-        Сервис генерации эскизов не подключён. <a className="text-link" href="#published-sketch">К загрузке своего эскиза</a>
-      </Notice>}
+      {canGenerate ? <form ref={placementForm} className={styles.generation} onSubmit={start}>
+          <fieldset className={styles.placement} disabled={cannotStart}>
+            <legend>Размещение вышивки</legend>
+            <p className="muted">Измерьте участок ткани на сложенном изделии. Эскиз разместится в центре этой зоны.</p>
+            <label className={`field ${styles.garmentSide}`}>Сторона изделия
+              <span className={styles.selectControl}>
+                <select name="side" defaultValue="" required>
+                  <option value="" disabled>Выберите сторону</option>
+                  <option value="FRONT">Перед</option><option value="BACK">Спинка</option>
+                </select>
+              </span>
+            </label>
+            <div className={styles.measurements}>
+              <div className={styles.measurementPair}>
+                <Measurement name="panelWidth" label="Ширина панели, см" />
+                <Measurement name="panelHeight" label="Высота панели, см" />
+              </div>
+              <div className={styles.measurementPair}>
+                <Measurement name="embroideryWidth" label="Ширина вышивки, см" mm={frameMm} maxMm={frameMm} />
+                <Measurement name="embroideryHeight" label="Высота вышивки, см" mm={frameMm} maxMm={frameMm} />
+              </div>
+            </div>
+            <div className={styles.generationForm}>
+              <VariantLimit />
+              <button className="button solid">Сгенерировать эскиз</button>
+            </div>
+          </fieldset>
+        </form> : <Notice>
+          {workspace.available ? "Для этого заказа не выбрана рамка вышивки." : "Сервис генерации эскизов не подключён."}{" "}
+          <a className="text-link" href="#published-sketch">Загрузить свой эскиз</a>
+        </Notice>}
       <div ref={generationStatus} className={styles.generationStatus} role="status" tabIndex={-1}>
         {active && <p>{latestJob?.status === "QUEUED" ? "Эскизы в очереди…" : "Готовим эскизы по фото и переписке…"}</p>}
         {!active && !loadError && latestJob?.status === "SUCCEEDED" && <p>Эскизы готовы к просмотру.</p>}
@@ -129,7 +165,7 @@ export function AdminSketchGeneration({ orderId, path, publishedFileId, busy, on
       {workspace.drafts.length > 0 && <div className={styles.variants}>
         {workspace.drafts.map((draft, index) => {
           const title = `Вариант ${index + 1}`;
-          const image = filePath(orderId, draft.fileId);
+          const image = filePath(order.id, draft.fileId);
           const current = draft.fileId === publishedFileId;
           const editing = revisionId === draft.fileId;
           return <article className={styles.variant} key={draft.fileId} aria-label={title}>
@@ -146,7 +182,7 @@ export function AdminSketchGeneration({ orderId, path, publishedFileId, busy, on
               </div>
               {draft.interpretation && <p className="muted preline">{draft.interpretation}</p>}
               <div className={styles.variantActions}>
-                {workspace.available && <button type="button" className="button outline" disabled={cannotStart}
+                {canGenerate && <button type="button" className="button outline" disabled={cannotStart}
                   aria-expanded={editing} aria-controls={editing ? "sketch-revision" : undefined}
                   onClick={(event) => openRevision(event, draft.fileId)}>Внести правки</button>}
                 {!current && !draft.published && <button type="button" className="button outline" disabled={busy || Boolean(loadError)}
@@ -172,7 +208,7 @@ export function AdminSketchGeneration({ orderId, path, publishedFileId, busy, on
         })}
       </div>}
     </>}
-    {preview && <SketchPreview title={preview.title} image={filePath(orderId, preview.draft.fileId)} publish={preview.publish}
+    {preview && <SketchPreview title={preview.title} image={filePath(order.id, preview.draft.fileId)} publish={preview.publish}
       onClose={() => setPreview(undefined)} onPublish={async () => {
         await onPublish(preview.draft.fileId);
         setPublished(preview.draft.fileId);
@@ -180,6 +216,12 @@ export function AdminSketchGeneration({ orderId, path, publishedFileId, busy, on
         reload();
       }} />}
   </section>;
+}
+
+function Measurement({ name, label, mm, maxMm = 9999 }: { name: string; label: string; mm?: number; maxMm?: number }) {
+  return <label className="field">{label}
+    <input name={name} type="number" min="0.1" max={maxMm / 10} step="0.1" defaultValue={mm === undefined ? undefined : mm / 10} required />
+  </label>;
 }
 
 function VariantLimit({ disabled }: { disabled?: boolean }) {

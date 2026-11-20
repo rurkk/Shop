@@ -66,10 +66,11 @@ class OrderPayments(
                 confirmOrder(order, payment, offerVersion)
             }
             if (previous == null || previous.status == ProviderStatus.CANCELED) {
-                gateway.requireTestShop()
+                gateway.requireConfiguredShop()
                 payments.reserveAttempt(payment.id, gateway.shopId, settings.orderUrl(id))
             } else {
                 requireShop(previous, gateway)
+                if (previous.status == ProviderStatus.CREATING) gateway.requireConfiguredShop()
             }
         }
         return requireNotNull(tx.execute {
@@ -103,6 +104,7 @@ class OrderPayments(
             quantity = 1,
             catalogItem = if (order.type == OrderType.CATALOG) orders.catalogItem(order.id) else null,
             description = order.description,
+            embroidery = if (order.type == OrderType.CUSTOM_PHOTO) order.requireEmbroidery() else null,
             sourceFileIds = orders.sources(order.id),
             itemKopecks = itemKopecks,
             deliveryKopecks = deliveryKopecks,
@@ -123,19 +125,25 @@ class OrderPayments(
             Garment.T_SHIRT -> "Футболка с вышивкой по фото"
             Garment.SWEATSHIRT -> "Свитшот с вышивкой по фото"
         }
+        val embroideryLine = terms.embroidery?.let {
+            val size = it.frame.sizeMm / 10
+            val background = if (it.threePhotoBackground) "фон из трёх кадров авто" else "без фона"
+            val licensePlate = if (it.licensePlate) ", вышивка госномера в подарок" else ""
+            "\nВышивка: рамка $size × $size см, $background$licensePlate."
+        }.orEmpty()
         val deliveryDate = terms.deliverBy.format(DateTimeFormatter.ofPattern("dd.MM.uuuu"))
         mail.notifyCustomer(order.id, order.email, "Заказ KNITSEW подтверждён", """
-            Вы подтвердили условия заказа.
-
-            Изделие: $productName, размер ${terms.size}, цвет ${terms.color}, ${terms.quantity} шт.
-            Стоимость изделия: ${rubles(terms.itemKopecks)}
-            Доставка: ${rubles(terms.deliveryKopecks)}
-            Всего к оплате: ${rubles(terms.totalKopecks)}
-            Пункт выдачи СДЭК: ${terms.city}, ${terms.pickupPointAddress} (${terms.pickupPointCode})
-            Передать получателю не позднее $deliveryDate.
-
-            Редакция публичной оферты $offerVersion: $offerUrl
-        """.trimIndent())
+            |Вы подтвердили условия заказа.
+            |
+            |Изделие: $productName, размер ${terms.size}, цвет ${terms.color}, ${terms.quantity} шт.$embroideryLine
+            |Стоимость изделия: ${rubles(terms.itemKopecks)}
+            |Доставка: ${rubles(terms.deliveryKopecks)}
+            |Всего к оплате: ${rubles(terms.totalKopecks)}
+            |Пункт выдачи СДЭК: ${terms.city}, ${terms.pickupPointAddress} (${terms.pickupPointCode})
+            |Передать получателю не позднее $deliveryDate.
+            |
+            |Редакция публичной оферты $offerVersion: $offerUrl
+        """.trimMargin())
     }
 
     private fun rubles(kopecks: Long) = BigDecimal.valueOf(kopecks, 2).toPlainString().replace('.', ',') + " ₽"
@@ -152,6 +160,7 @@ class OrderPayments(
                 ProviderStatus.CREATING -> {
                     order.requireStatus(OrderStatus.AWAITING_PAYMENT)
                     if (acceptances.get(id) == null) conflict("Offer terms are incomplete")
+                    gateway.requireConfiguredShop()
                     createPayment(gateway, order, payment, attempt)
                 }
                 ProviderStatus.PENDING -> applyPayment(
@@ -207,10 +216,13 @@ class OrderPayments(
             val refund = payments.latestRefund(attempt.id)
             if (refund == null || refund.status == ProviderStatus.CANCELED) {
                 if (order.status == OrderStatus.CANCELLED) conflict("The order is already cancelled")
+                gateway.requireConfiguredShop()
                 val request = payments.reserveRefund(attempt.id)
                 history.record(id, OrderAction.REFUND_REQUESTED, actor.email, mapOf(
                     "refundId" to request.id, "amountKopecks" to payment.amountKopecks
                 ))
+            } else if (refund.status == ProviderStatus.CREATING) {
+                gateway.requireConfiguredShop()
             }
         }
         return requireNotNull(tx.execute {
@@ -338,7 +350,7 @@ class OrderPayments(
         throw ApiFailure(HttpStatus.BAD_GATEWAY, "YooKassa operation does not match the order")
 
     private fun gateway(): YooKassa = gateways.ifAvailable
-        ?: throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "YooKassa test checkout is not enabled")
+        ?: throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "YooKassa checkout is not enabled")
 }
 
 @RestController

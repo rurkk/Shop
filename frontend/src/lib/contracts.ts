@@ -33,6 +33,14 @@ export type Product = {
   measurements: ProductMeasurements[];
 };
 export type CatalogContents = { catalog: Catalog; products: Page<ProductSummary> };
+export type EmbroideryFrame = "SMALL" | "STANDARD" | "LARGE";
+export type EmbroideryConfiguration = {
+  frame: EmbroideryFrame; threePhotoBackground: boolean; licensePlate: boolean;
+};
+export type PhotoOrderOption = {
+  garment: "HOODIE" | "T_SHIRT" | "SWEATSHIRT"; frame: EmbroideryFrame; sizeMm: number;
+  threePhotoBackground: boolean; priceKopecks: number | null;
+};
 export type OrderType = "CUSTOM_PHOTO" | "CATALOG";
 export type OrderStatus =
   | "DRAFT" | "EXPIRED" | "IN_REVIEW" | "AWAITING_DELIVERY_QUOTE" | "AWAITING_PAYMENT"
@@ -42,6 +50,7 @@ export type OrderStatus =
 export type Order = {
   id: string; type: OrderType; status: OrderStatus; email: string; garment: string; size: string;
   color: string; description: string | null; itemKopecks: number | null; productionDays: number | null;
+  embroidery: EmbroideryConfiguration | null;
   trackingNumber: string | null; rejectionReason: string | null; cancellationReason: string | null;
   createdAt: string;
 };

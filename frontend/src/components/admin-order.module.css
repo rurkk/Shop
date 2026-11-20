@@ -104,16 +104,40 @@
   background: var(--order-surface);
 }
 
+.placement,
+.measurements {
+  display: grid;
+  gap: 14px;
+}
+
+.placement legend {
+  font-size: 1rem;
+}
+
+.garmentSide {
+  width: min(100%, 16rem);
+}
+
+.measurementPair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: 12px;
+}
+
 .generationForm {
   display: grid;
   grid-template-columns: minmax(0, 12rem) auto;
   justify-content: start;
   align-items: end;
   gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
 }
 
 .generationForm > :global(.button),
-.selectControl select {
+.selectControl select,
+.measurementPair input {
   width: 100%;
   min-height: 46px;
 }
@@ -244,6 +268,12 @@
   max-height: 50dvh;
   object-fit: contain;
   background: var(--order-surface, #f6f6f4);
+}
+
+@container (width >= 35rem) {
+  .measurements {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @container (width < 24rem) {

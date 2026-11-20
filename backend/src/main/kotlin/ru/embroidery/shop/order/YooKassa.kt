@@ -1,8 +1,10 @@
 package ru.embroidery.shop.order
 
+import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.boot.context.properties.ConfigurationProperties
-import org.springframework.context.annotation.Profile
+import org.springframework.core.env.Environment
+import org.springframework.core.env.Profiles
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
 import org.springframework.http.client.JdkClientHttpRequestFactory
@@ -18,12 +20,14 @@ import java.net.http.HttpClient
 import java.time.Duration
 import java.util.UUID
 
+private const val YOOKASSA_API_BASE = "https://api.yookassa.ru/v3"
+
 @ConfigurationProperties("shop.yookassa")
 class YooKassaSettings(
     val enabled: Boolean = false,
     val shopId: String = "",
     val secretKey: String = "",
-    val apiBase: String = "https://api.yookassa.ru/v3"
+    val apiBase: String = YOOKASSA_API_BASE
 )
 
 internal data class GatewayPayment(
@@ -44,28 +48,39 @@ internal data class GatewayRefund(
     val requestId: UUID?
 )
 
-@Profile("!production")
 @Component
 @ConditionalOnProperty("shop.yookassa.enabled", havingValue = "true")
-class YooKassa(private val settings: YooKassaSettings, private val json: ObjectMapper) {
+class YooKassa internal constructor(
+    settings: YooKassaSettings,
+    private val json: ObjectMapper,
+    environment: Environment,
+    builder: RestClient.Builder
+) {
+    @Autowired
+    constructor(settings: YooKassaSettings, json: ObjectMapper, environment: Environment) :
+        this(settings, json, environment, restClientBuilder())
+
     val shopId = settings.shopId
+    private val testMode = !environment.acceptsProfiles(Profiles.of("production"))
     private val client: RestClient
 
     init {
         require(shopId.matches(Regex("[0-9]{1,32}")) && settings.secretKey.isNotBlank()) {
-            "Set the test shop ID and secret key"
+            "Set SHOP_YOOKASSA_SHOP_ID and SHOP_YOOKASSA_SECRET_KEY"
         }
-        val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build()
-        val factory = JdkClientHttpRequestFactory(http).apply { setReadTimeout(Duration.ofSeconds(6)) }
-        client = RestClient.builder().baseUrl(settings.apiBase.trimEnd('/')).requestFactory(factory)
+        val apiBase = settings.apiBase.trimEnd('/')
+        require(testMode || apiBase == YOOKASSA_API_BASE) {
+            "The production profile requires the YooKassa API at $YOOKASSA_API_BASE"
+        }
+        client = builder.baseUrl(apiBase)
             .defaultHeaders { it.setBasicAuth(shopId, settings.secretKey) }.build()
     }
 
-    internal fun requireTestShop() {
+    internal fun requireConfiguredShop() {
         val shop = read(client.get().uri("/me"))
         if (shop.path("account_id").asString(null) != shopId || shop.path("status").stringValue(null) != "enabled" ||
-            !shop.path("test").booleanValue(false)) {
-            throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "Configure an enabled YooKassa test shop")
+            !matchesMode(shop)) {
+            throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "YooKassa shop is unavailable or does not match this environment")
         }
     }
 
@@ -89,7 +104,11 @@ class YooKassa(private val settings: YooKassaSettings, private val json: ObjectM
         )))
     }
 
-    internal fun getRefund(id: UUID): GatewayRefund = refund(read(client.get().uri("/refunds/{id}", id)))
+    internal fun getRefund(id: UUID): GatewayRefund {
+        // Refund objects have no test flag. Verify the merchant before reading them.
+        requireConfiguredShop()
+        return refund(read(client.get().uri("/refunds/{id}", id)))
+    }
 
     private fun amount(kopecks: Long) = mapOf("currency" to "RUB", "value" to BigDecimal.valueOf(kopecks, 2).toPlainString())
 
@@ -110,7 +129,7 @@ class YooKassa(private val settings: YooKassaSettings, private val json: ObjectM
     private fun payment(node: JsonNode): GatewayPayment {
         val status = status(node)
         val paid = node.path("paid")
-        if (!node.path("test").booleanValue(false) || !paid.isBoolean ||
+        if (!matchesMode(node) || !paid.isBoolean ||
             paid.booleanValue() != (status == ProviderStatus.SUCCEEDED)) {
             invalidResponse()
         }
@@ -135,6 +154,11 @@ class YooKassa(private val settings: YooKassaSettings, private val json: ObjectM
         }
     )
 
+    private fun matchesMode(node: JsonNode): Boolean {
+        val test = node.path("test")
+        return test.isBoolean && test.booleanValue() == testMode
+    }
+
     private fun status(node: JsonNode) = when (node.path("status").stringValue(null)) {
         "pending" -> ProviderStatus.PENDING
         "succeeded" -> ProviderStatus.SUCCEEDED
@@ -158,5 +182,11 @@ class YooKassa(private val settings: YooKassaSettings, private val json: ObjectM
 
     private companion object {
         val checkoutHosts = setOf("yoomoney.ru", "www.yoomoney.ru", "yookassa.ru", "www.yookassa.ru")
+
+        fun restClientBuilder(): RestClient.Builder {
+            val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build()
+            val factory = JdkClientHttpRequestFactory(http).apply { setReadTimeout(Duration.ofSeconds(6)) }
+            return RestClient.builder().requestFactory(factory)
+        }
     }
 }

@@ -26,6 +26,7 @@ internal data class AcceptedOrderTerms(
     val quantity: Int,
     val catalogItem: CatalogOrderItem?,
     val description: String?,
+    val embroidery: EmbroideryConfiguration?,
     val sourceFileIds: List<UUID>,
     val itemKopecks: Long,
     val deliveryKopecks: Long,

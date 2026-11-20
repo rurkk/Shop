@@ -1,7 +1,15 @@
 server {
     listen 80 default_server;
     server_name ${SHOP_DOMAIN};
-    return 308 https://${SHOP_DOMAIN}$request_uri;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /etc/nginx/tls/acme;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 308 https://${SHOP_DOMAIN}$request_uri;
+    }
 }
 
 server {
@@ -18,4 +26,5 @@ server {
     }
 
     include /etc/nginx/routes.conf;
+    include /etc/nginx/pilot.d/*.conf;
 }

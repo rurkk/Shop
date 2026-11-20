@@ -8,7 +8,7 @@ import { calendarDateLabel, days, garmentLabel } from "@/lib/format";
 import { useResource, useTask } from "@/lib/hooks";
 import { AccessForm } from "./access";
 import { DeliveryFields, deliveryFrom } from "./delivery-fields";
-import { DeliveryDetails, DeliverySummary, OrderAcceptance, OrderAmounts, OrderFiles, OrderHead, OrderPhoto, OrderSummary, OrderTracking, SketchImage } from "./order-common";
+import { DeliveryDetails, DeliverySummary, OrderAcceptance, OrderAmounts, OrderEmbroideryFacts, OrderFiles, OrderHead, OrderPhoto, OrderSummary, OrderTracking, SketchImage } from "./order-common";
 import { OrderChat } from "./order-chat";
 import { photoDataNotice, PrivacyLink } from "./privacy-link";
 import { Failure, Icon, Modal, Notice, Pending } from "./ui";
@@ -176,6 +176,7 @@ function OrderPaymentPanel({ details, busy, onCheckout, onSync }: {
       <div><dt>Изделие</dt><dd>{catalogItem ? catalogItem.productName : `${garmentLabel(order.garment)} с вышивкой по фото`}</dd></div>
       <div><dt>Количество</dt><dd>1 шт.</dd></div>
       <div><dt>Размер и цвет</dt><dd>{order.size} · {order.color}</dd></div>
+      {order.embroidery && <OrderEmbroideryFacts embroidery={order.embroidery} />}
       {catalogItem && <div><dt>Артикул</dt><dd>{catalogItem.sku}</dd></div>}
       {order.productionDays !== null && <div><dt>Подготовка изделия</dt><dd>{days(order.productionDays)}</dd></div>}
       {delivery.deliveryDays !== null && <div><dt>Перевозка после отправки</dt><dd>{days(delivery.deliveryDays)}</dd></div>}
@@ -282,6 +283,9 @@ function DraftSubmit({ details, path, onUpdate, task, deliveryEditing }: {
   const hintId = useId();
   const isPhoto = details.order.type === "CUSTOM_PHOTO";
   const photos = details.sourceFileIds;
+  const threePhotoBackground = details.order.embroidery?.threePhotoBackground;
+  const photoLimit = threePhotoBackground ? 3 : sourcePhotoLimit;
+  const photosReady = threePhotoBackground ? photos.length === photoLimit : photos.length > 0;
   const busy = task.busy;
 
   useEffect(() => {
@@ -346,7 +350,8 @@ function DraftSubmit({ details, path, onUpdate, task, deliveryEditing }: {
 
   return <section ref={section} className="panel stack">
     <h2 ref={heading} tabIndex={-1}>{isPhoto ? "Фото и заявка" : "Отправка заявки"}</h2>
-    {isPhoto && photos.length === 0 && <p>Добавьте хотя бы одно исходное фото. Выберите чёткий кадр с нужного ракурса.</p>}
+    {threePhotoBackground && <p>Для фона из трёх кадров загрузите три фото авто с нужных ракурсов. Загружено {photos.length} из 3.</p>}
+    {isPhoto && !threePhotoBackground && photos.length === 0 && <p>Добавьте хотя бы одно исходное фото. Выберите чёткий кадр с нужного ракурса.</p>}
     {!isPhoto && <p>Проверьте данные заказа. По заявке мы проверим наличие изделия и рассчитаем доставку.</p>}
     {isPhoto && <>
       {photos.length > 0 && <ul className={`order-files ${styles.photoGrid}`} role="list">
@@ -364,9 +369,10 @@ function DraftSubmit({ details, path, onUpdate, task, deliveryEditing }: {
       </ul>}
       <p className="muted" id={hintId}>JPG или PNG, до 10 МиБ. {photoDataNotice} <PrivacyLink /></p>
       <input ref={input} type="file" accept={imageAccept} hidden disabled={busy} onChange={uploadPhoto} />
-      {photos.length < sourcePhotoLimit ? <button ref={uploadButton} className="button outline" type="button" aria-describedby={hintId}
-        disabled={busy} onClick={() => choosePhoto(null)}><Icon name="upload" /> {uploading ? "Загружаем фото…" : "Загрузить фото"}</button>
-        : <p className="muted">Загружено 5 фото — это максимум для одного заказа.</p>}
+      {photos.length < photoLimit && <button ref={uploadButton} className="button outline" type="button" aria-describedby={hintId}
+        disabled={busy} onClick={() => choosePhoto(null)}><Icon name="upload" /> {uploading ? "Загружаем фото…" : "Загрузить фото"}</button>}
+      {!threePhotoBackground && photos.length >= photoLimit && <p className="muted">Загружено 5 фото — это максимум для одного заказа.</p>}
+      {threePhotoBackground && photos.length > photoLimit && <p className="muted">Удалите лишние фото, чтобы осталось три.</p>}
       <p className="sr-only" role="status">{uploading ? "Загружаем фото…" : photoStatus}</p>
       {!deleteId && <Failure error={error} />}
       {deleteId && <Modal title="Удалить фото?" onClose={() => {
@@ -393,7 +399,7 @@ function DraftSubmit({ details, path, onUpdate, task, deliveryEditing }: {
     </>}
     <p className="muted">После расчёта вы сможете проверить условия и подтвердить заказ.</p>
     {deliveryEditing && <p className="muted">Сохраните данные доставки или отмените изменения, чтобы отправить заявку.</p>}
-    <button className="button solid" type="button" disabled={busy || deliveryEditing || (isPhoto && photos.length === 0)}
+    <button className="button solid" type="button" disabled={busy || deliveryEditing || (isPhoto && !photosReady)}
       onClick={() => void task.run(async () => {
         setError(undefined);
         setPhotoStatus("");

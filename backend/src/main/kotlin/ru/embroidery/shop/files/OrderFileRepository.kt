@@ -9,6 +9,7 @@ import ru.embroidery.shop.auth.Actor
 import ru.embroidery.shop.auth.Role
 import ru.embroidery.shop.badRequest
 import ru.embroidery.shop.conflict
+import ru.embroidery.shop.order.BACKGROUND_PHOTO_COUNT
 import ru.embroidery.shop.order.Order
 import ru.embroidery.shop.order.OrderRepository
 import ru.embroidery.shop.order.OrderStatus
@@ -34,7 +35,7 @@ class OrderFileRepository(private val db: JdbcClient, private val orders: OrderR
         val order = orders.lock(orderId)
         checkUpload(actor, order, purpose)
         if (replaces == null) {
-            checkLimit(orderId, purpose)
+            checkLimit(order, purpose)
         } else {
             if (purpose != FilePurpose.SOURCE) badRequest("Only a source photo can be replaced")
             val available = db.sql("""
@@ -124,13 +125,13 @@ class OrderFileRepository(private val db: JdbcClient, private val orders: OrderR
             WHERE order_id = :order AND id = :file AND purpose = 'CHAT' AND ready AND uploader_email = :email)
     """).param("order", orderId).param("file", fileId).param("email", actor.email).query(Boolean::class.java).single()
 
-    private fun checkLimit(orderId: UUID, purpose: FilePurpose) {
+    private fun checkLimit(order: Order, purpose: FilePurpose) {
         val count = db.sql("""
             SELECT count(*) FROM order_files
             WHERE order_id = :order AND purpose = :purpose AND NOT deleted AND replaces_file_id IS NULL
-        """).param("order", orderId).param("purpose", purpose.name).query(Long::class.java).single()
+        """).param("order", order.id).param("purpose", purpose.name).query(Long::class.java).single()
         val limit = when (purpose) {
-            FilePurpose.SOURCE -> 5
+            FilePurpose.SOURCE -> if (order.requireEmbroidery().threePhotoBackground) BACKGROUND_PHOTO_COUNT else 5
             FilePurpose.SKETCH -> 25
             FilePurpose.CHAT -> 100
         }

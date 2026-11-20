@@ -213,6 +213,7 @@ def check_staff_accounts(admin, buyer, order, run):
     assert admin.call(session) == {"email": STAFF.lower(), "canManageStaff": True}
     Browser().call(accounts, expected=401)
     buyer.call(accounts, expected=403)
+    buyer.call("/api/staff/sketch-settings", expected=403)
     admin.call(accounts, "POST", {"email": "invalid"}, expected=403, csrf=False)
     directory = admin.call(accounts)
     own = next(item for item in directory["items"] if item["email"] == directory["currentEmail"])
@@ -235,6 +236,8 @@ def check_staff_accounts(admin, buyer, order, run):
         assert member.call(session) == {"email": email, "canManageStaff": False}
         member.call(order)
         member.call(accounts, expected=403)
+        member.call("/api/staff/sketch-settings", expected=403)
+        member.call("/api/staff/sketch-settings", "PUT", {}, expected=403)
         member.call(accounts, "POST", {"email": f"forbidden-{run}@example.test", "canManageStaff": True}, expected=403)
 
         reset = admin.call(path + "/reset-totp", "POST")
@@ -262,7 +265,7 @@ def check_staff_accounts(admin, buyer, order, run):
 IMAGE_METADATA = b"Shop synthetic private metadata"
 
 
-def png(metadata=False):
+def png(metadata=False, red=255):
     def chunk(name, data):
         return struct.pack(">I", len(data)) + name + data + struct.pack(">I", zlib.crc32(name + data))
 
@@ -270,7 +273,7 @@ def png(metadata=False):
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
         + (chunk(b"tEXt", b"Comment\0" + IMAGE_METADATA) if metadata else b"")
-        + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00"))
+        + chunk(b"IDAT", zlib.compress(bytes((0, red, 0, 0))))
         + chunk(b"IEND", b"")
     )
 
@@ -307,10 +310,36 @@ def read_event(stream, name):
             event[field] = value.lstrip(" ")
 
 
-def new_order(browser, email):
+def photo_draft(email, garment="HOODIE", frame="SMALL", three_photos=False, plate=False):
+    return {
+        "email": email, "garment": garment, "size": "M", "color": "черный",
+        "embroidery": {"frame": frame, "threePhotoBackground": three_photos, "licensePlate": plate},
+    }
+
+
+def new_order(browser, email, garment="HOODIE"):
     browser.renew_csrf()
-    form = {"email": email, "garment": "HOODIE", "size": "M", "color": "черный"}
-    return "/api/orders/" + browser.call("/api/orders/drafts", "POST", form, expected=201)["id"]
+    return "/api/orders/" + browser.call("/api/orders/drafts", "POST", photo_draft(email, garment), expected=201)["id"]
+
+
+def check_photo_options(visitor):
+    prices = {
+        "HOODIE": (650000, 740000, 870000, 990000),
+        "T_SHIRT": (550000, 640000, 770000, 890000),
+        "SWEATSHIRT": (None, None, None, None),
+    }
+    variants = (("SMALL", 120, False), ("STANDARD", 160, False), ("LARGE", 220, False), ("LARGE", 220, True))
+    rows = visitor.call("/api/orders/photo-options")
+    expected = {
+        (garment, frame, size, three_photos): price
+        for garment, garment_prices in prices.items()
+        for (frame, size, three_photos), price in zip(variants, garment_prices)
+    }
+    assert len(rows) == len(expected)
+    assert {
+        (row["garment"], row["frame"], row["sizeMm"], row["threePhotoBackground"]): row["priceKopecks"]
+        for row in rows
+    } == expected
 
 
 def status(snapshot, expected):
@@ -404,6 +433,8 @@ def check_cancellation(staff, buyer, order, image):
     staff_order = order.replace("/api/orders/", "/api/staff/orders/", 1)
     buyer.upload(order, "SOURCE", image)
     status(buyer.call(order + "/submit", "POST"), "IN_REVIEW")
+    assert buyer.call(order)["order"]["itemKopecks"] is None
+    staff.call(staff_order + "/quote", "POST", {"productionDays": 5}, expected=400)
     staff.call(staff_order + "/quote", "POST", {"itemKopecks": 150000, "productionDays": 5})
     contact = buyer.call(order + "/delivery", "PUT", pickup_contact())
     staff.call(staff_order + "/delivery-quote", "POST", delivery_quote(contact["delivery"], 30000))
@@ -506,6 +537,14 @@ def check_catalog_checkout(staff, other_buyer, run, slug, variant_route, variant
     buyer.call(checkout_route, "POST", expected=400)
     buyer.call(checkout_route, "POST", {"offerVersion": "outdated"}, expected=409)
     assert buyer.call(order)["acceptance"] is None
+    try:
+        gateway_command("shop-mode", test=False)
+        buyer.call(checkout_route, "POST", OFFER_INPUT, expected=503)
+        unaccepted = buyer.call(order)
+        assert unaccepted["acceptance"] is None and unaccepted["payment"]["checkoutStatus"] is None
+        assert not mail_items(email, "Заказ KNITSEW подтверждён")
+    finally:
+        gateway_command("shop-mode", test=True)
     provider_id = open_checkout(buyer, order)
     accepted = buyer.call(order)["acceptance"]
     gateway_command("payment", paymentId=provider_id, status="canceled")
@@ -530,6 +569,12 @@ def check_catalog_checkout(staff, other_buyer, run, slug, variant_route, variant
     assert len(mail_items(email, "Заказ KNITSEW подтверждён")) == 1
     refund_route = staff_order + "/refund"
     buyer.call(refund_route, "POST", expected=403)
+    try:
+        gateway_command("shop-mode", test=False)
+        staff.call(refund_route, "POST", expected=503)
+        assert staff.call(staff_order)["payment"]["refund"] is None
+    finally:
+        gateway_command("shop-mode", test=True)
     requested = staff.call(refund_route, "POST")
     assert requested["refund"]["status"] == "PENDING"
     assert staff.call(refund_route, "POST") == requested
@@ -664,6 +709,38 @@ def check_catalogs(staff, buyer, run):
     print("Verified catalog checkout, payment retry, shipment, refund, and staff history", flush=True)
 
 
+def save_sketch_settings(staff, route, selection, retained=(), files=(), expected=200):
+    boundary = "settings-" + uuid.uuid4().hex
+    settings = json.dumps({"selection": selection, "retainedReferenceIds": list(retained)}).encode()
+    body = (
+        f'--{boundary}\r\nContent-Disposition: form-data; name="settings"\r\n'
+        "Content-Type: application/json\r\n\r\n"
+    ).encode() + settings + b"\r\n"
+    for name, media_type, data in files:
+        body += (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="files"; filename="{name}"\r\n'
+            f"Content-Type: {media_type}\r\n\r\n"
+        ).encode() + data + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+    return staff.call(route, "PUT", expected=expected, data=body,
+                      headers={"Content-Type": "multipart/form-data; boundary=" + boundary})
+
+
+def generate_sketch(staff, route, input):
+    started = staff.call(route, "POST", input, expected=202)
+    assert started["status"] == "QUEUED"
+    deadline = time.monotonic() + 25
+    while time.monotonic() < deadline:
+        workspace = staff.call(route)
+        job = workspace["latestJob"]
+        assert job["id"] == started["id"]
+        assert job["status"] != "FAILED", job["failure"]
+        if job["status"] == "SUCCEEDED":
+            return [draft for draft in workspace["drafts"] if draft["jobId"] == job["id"]]
+        time.sleep(0.4)
+    raise AssertionError("Sketch generation did not finish")
+
+
 def main():
     buyer, staff, other = Browser(), Browser(), Browser()
     run = uuid.uuid4().hex[:12]
@@ -672,16 +749,22 @@ def main():
     image = png(metadata=True)
 
     buyer.call("/actuator/health/readiness", expected=404)
+    check_photo_options(Browser())
     buyer.call("/api/orders/drafts", "POST", {}, expected=403, csrf=False)
     buyer.renew_csrf()
-    draft = {"email": buyer_email, "garment": "HOODIE", "size": "M", "color": "черный"}
+    draft = photo_draft(buyer_email, frame="LARGE", three_photos=True, plate=True)
     buyer.call("/api/orders/drafts", "POST", dict(draft, garment=0), expected=400)
     buyer.call("/api/orders/drafts", "POST", dict(draft, unexpected=True), expected=400)
-    order = new_order(buyer, buyer_email)
+    buyer.call("/api/orders/drafts", "POST", {key: value for key, value in draft.items() if key != "embroidery"}, expected=400)
+    buyer.call("/api/orders/drafts", "POST", photo_draft(buyer_email, frame="STANDARD", three_photos=True), expected=400)
+    order = "/api/orders/" + buyer.call("/api/orders/drafts", "POST", draft, expected=201)["id"]
     staff_order = order.replace("/api/orders/", "/api/staff/orders/", 1)
     buyer.call(order, expected=401)
     log_in(buyer, order + "/access", buyer_email, verify_wrong_code=True)
-    other_order = new_order(other, other_email)
+    created = buyer.call(order)["order"]
+    assert created["embroidery"] == draft["embroidery"]
+    assert created["itemKopecks"] == 990000
+    other_order = new_order(other, other_email, garment="SWEATSHIRT")
     log_in(other, other_order + "/access", other_email)
     other.call(order, expected=404)
     buyer.call("/api/staff/orders", expected=403)
@@ -702,22 +785,36 @@ def main():
         buyer.call(replacement_path, "DELETE", expected=204)
     buyer.call(order + "/submit", "POST", expected=409)
     last_photo = buyer.upload(order, "SOURCE", image)
+    buyer.call(order + "/submit", "POST", expected=409)
+    buyer.upload(order, "SOURCE", png(red=180))
+    buyer.call(order + "/submit", "POST", expected=409)
+    buyer.upload(order, "SOURCE", png(red=110))
+    buyer.upload(order, "SOURCE", png(red=80), expected=409)
+    replacement = buyer.upload_image(f"{order}/files?purpose=SOURCE&replace={last_photo['id']}", png(red=50))
+    assert len(buyer.call(order)["sourceFileIds"]) == 3
     status(buyer.call(order + "/submit", "POST"), "IN_REVIEW")
     status(buyer.call(order + "/submit", "POST"), "IN_REVIEW")
-    buyer.call(f"{order}/files/{last_photo['id']}", "DELETE", expected=409)
+    buyer.call(f"{order}/files/{replacement['id']}", "DELETE", expected=409)
     order_url = f"{SHOP}{order.removeprefix('/api')}"
     assert order_url in wait_for_mail(buyer_email, "Заявка получена")
     log_in_staff(staff, STAFF, check_controls=True)
+    sketch_generation = staff_order + "/sketch-generation"
+    placement = {"side": "FRONT", "panelWidthMm": 500, "panelHeightMm": 500,
+                 "embroideryWidthMm": 220, "embroideryHeightMm": 220}
+    buyer.call(sketch_generation, expected=403)
+    staff.call(sketch_generation, "POST", {"maxVariants": 1, "placement": placement}, expected=409)
     assert any(item["id"] == order.rsplit("/", 1)[-1] for item in staff.call("/api/staff/orders")["items"])
     check_staff_accounts(staff, buyer, order, run)
     check_catalogs(staff, buyer, run)
     check_storefront(staff, buyer)
     print("Verified order access, CSRF, and private S3 upload/download", flush=True)
-    staff.call(staff_order + "/quote", "POST", {"itemKopecks": 175001.5, "productionDays": 7}, expected=400)
+    staff.call(staff_order + "/quote", "POST", {"itemKopecks": 990000.5, "productionDays": 7}, expected=400)
+    staff.call(staff_order + "/quote", "POST", {"itemKopecks": 1000000, "productionDays": 7}, expected=400)
     quote = staff.call(
-        staff_order + "/quote", "POST", {"itemKopecks": 175001, "productionDays": 7},
+        staff_order + "/quote", "POST", {"productionDays": 7},
     )
     status(quote, "AWAITING_DELIVERY_QUOTE")
+    assert quote["order"]["itemKopecks"] == 990000 and quote["order"]["embroidery"] == draft["embroidery"]
     assert quote["totalKopecks"] is None and quote["payment"] is None
     buyer.call(order + "/payment/checkout", "POST", OFFER_INPUT, expected=409)
     delivery_route = staff_order + "/delivery-quote"
@@ -725,23 +822,32 @@ def main():
     with_contact = buyer.call(order + "/delivery", "PUT", pickup_contact())
     priced = staff.call(delivery_route, "POST", delivery_quote(with_contact["delivery"], 30000))
     status(priced, "AWAITING_PAYMENT")
-    assert priced["totalKopecks"] == priced["payment"]["amountKopecks"] == 205001
+    assert priced["totalKopecks"] == priced["payment"]["amountKopecks"] == 1020000
     staff.upload(order, "SKETCH", image, expected=409)
     gateway_command("lose-payment-response")
     buyer.call(order + "/payment/checkout", "POST", OFFER_INPUT, expected=502)
     interrupted = buyer.call(order)
     assert interrupted["payment"]["checkoutStatus"] == "CREATING"
     assert interrupted["acceptance"]["offerVersion"] == OFFER_VERSION
+    try:
+        gateway_command("shop-mode", test=False)
+        buyer.call(order + "/payment/sync", "POST", expected=503)
+        assert buyer.call(order)["payment"]["checkoutStatus"] == "CREATING"
+    finally:
+        gateway_command("shop-mode", test=True)
     recovered = buyer.call(order + "/payment/sync", "POST")
     provider_id = open_checkout(buyer, order)
     assert recovered["checkoutUrl"].endswith(provider_id)
     assert buyer.call(order)["acceptance"] == interrupted["acceptance"]
+    confirmation = wait_for_mail(buyer_email, "Заказ KNITSEW подтверждён")
+    assert "22 × 22 см, фон из трёх кадров авто, вышивка госномера в подарок" in confirmation
+    assert "Всего к оплате: 10200,00 ₽" in confirmation
     notify("payment.succeeded", provider_id)
     status(buyer.call(order), "AWAITING_PAYMENT")
-    gateway_command("payment", paymentId=provider_id, status="succeeded", value="2050.00")
+    gateway_command("payment", paymentId=provider_id, status="succeeded", value="10199.99")
     notify("payment.succeeded", provider_id, expected=502)
     assert buyer.call(order)["payment"]["paidAt"] is None
-    gateway_command("payment", paymentId=provider_id, value="2050.01")
+    gateway_command("payment", paymentId=provider_id, value="10200.00")
     assert buyer.call(order + "/payment/sync", "POST")["paidAt"]
     status(buyer.call(order), "PREPARING_SKETCH")
 
@@ -769,6 +875,43 @@ def main():
     assert len(mail_items(buyer_email, "Заявка получена")) == 1
     print("Verified live SSE, replay, idempotent messages, and order email", flush=True)
 
+    buyer.call(order + "/messages", "POST", {
+        "clientMessageId": str(uuid.uuid4()), "body": f"Для эскиза оставьте контур, связь: {buyer_email}",
+    })
+    assert staff.call(sketch_generation) == {"available": True, "latestJob": None, "drafts": []}
+    model_settings = "/api/staff/sketch-settings"
+    original_models = staff.call(model_settings)["selection"]
+    initial_models = dict(original_models, responseModel="gemini-2-5-flash-lite", imageModel="flash")
+    save_sketch_settings(staff, model_settings, dict(initial_models, imageModel="unsupported"), expected=400)
+    initial_models["systemPrompt"] = "Чёткие контуры и хлопковые нити."
+    examples = (
+        ("palette.png", "image/png", image),
+        ("materials.txt", "text/plain", "Используйте два цвета.".encode()),
+    )
+    save_sketch_settings(staff, model_settings, initial_models, files=(("invalid.txt", "text/plain", b"\xff"),), expected=400)
+    saved = save_sketch_settings(staff, model_settings, initial_models, files=examples)
+    saved_models = saved["selection"]
+    assert saved_models["systemPrompt"] == initial_models["systemPrompt"]
+    assert [reference["name"] for reference in saved["references"]] == [entry[0] for entry in examples]
+    retained = [reference["id"] for reference in saved["references"]]
+    for ref_id, (_, _, data) in zip(retained, examples):
+        path = f"{model_settings}/references/{ref_id}"
+        assert staff.call(path) == data
+        buyer.call(path, expected=403)
+    save_sketch_settings(staff, model_settings, initial_models, expected=409)
+    buyer.call(sketch_generation, "POST", {"maxVariants": 1, "placement": placement}, expected=403)
+    staff.call(sketch_generation, "POST", {"feedback": "Без фона", "placement": placement}, expected=400)
+    staff.call(sketch_generation, "POST", {"maxVariants": 4, "placement": placement}, expected=400)
+    staff.call(sketch_generation, "POST", {"placement": dict(placement, embroideryWidthMm=221)}, expected=400)
+    drafts = generate_sketch(staff, sketch_generation, {"maxVariants": 2, "placement": placement})
+    assert len(drafts) == 2
+    for draft in drafts:
+        assert not draft["published"] and draft["previousFileId"] is None
+        draft_path = order + "/files/" + draft["fileId"]
+        assert staff.call(draft_path).startswith(b"\x89PNG\r\n\x1a\n")
+        buyer.call(draft_path, expected=404)
+    status(buyer.call(order), "PREPARING_SKETCH")
+
     sketch_file = staff.upload(order, "SKETCH", image)["id"]
     buyer.call(order + "/files/" + sketch_file, expected=404)
     snapshot = staff.call(staff_order + "/sketches", "POST", {"fileId": sketch_file})
@@ -776,8 +919,27 @@ def main():
     assert buyer.call(order + "/files/" + sketch_file) == image
     old_sketch = f"{order}/sketches/{snapshot['sketch']['id']}"
     status(buyer.call(old_sketch + "/request-changes", "POST"), "CHANGES_REQUESTED")
-    new_file = staff.upload(order, "SKETCH", image)["id"]
+    edited_models = save_sketch_settings(staff, model_settings, dict(
+        saved_models, responseModel="gemini-3-1-flash-lite", imageModel="standard",
+    ), retained=retained)["selection"]
+    assert staff.call(model_settings)["selection"] == edited_models
+    [revision] = generate_sketch(staff, sketch_generation, {
+        "previousFileId": drafts[1]["fileId"], "feedback": "Оставьте только контур", "placement": placement,
+    })
+    assert revision["previousFileId"] == drafts[1]["fileId"]
+    restored = save_sketch_settings(staff, model_settings, dict(original_models, version=edited_models["version"]))
+    assert restored["references"] == []
+    staff.call(f"{model_settings}/references/{retained[0]}", expected=404)
+    new_file = revision["fileId"]
+    revised_path = order + "/files/" + new_file
+    buyer.call(revised_path, expected=404)
+    assert staff.call(revised_path) != staff.call(order + "/files/" + drafts[1]["fileId"])
     revised = staff.call(staff_order + "/sketches", "POST", {"fileId": new_file})["sketch"]
+    assert buyer.call(revised_path) == staff.call(revised_path)
+    assert next(draft for draft in staff.call(sketch_generation)["drafts"] if draft["fileId"] == new_file)["published"]
+    for draft in drafts:
+        buyer.call(order + "/files/" + draft["fileId"], expected=404)
+    print("Verified private AI variants, revision from the selected image, and publication", flush=True)
     assert revised["version"] == 2
     buyer.call(old_sketch + "/approve", "POST", expected=409)
     status(buyer.call(f"{order}/sketches/{revised['id']}/approve", "POST"), "IN_PRODUCTION")

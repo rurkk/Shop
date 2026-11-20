@@ -11,6 +11,7 @@ class Provider(BaseHTTPRequestHandler):
     refunds = {}
     keys = {}
     fail_next_payment_response = False
+    shop_is_test = True
     authorization = "Basic " + base64.b64encode(b"12345:test-ci-key").decode()
 
     def reply(self, code, value):
@@ -26,7 +27,7 @@ class Provider(BaseHTTPRequestHandler):
             self.reply(401, {})
             return
         if self.path == "/v3/me":
-            self.reply(200, {"account_id": "12345", "test": True, "status": "enabled"})
+            self.reply(200, {"account_id": "12345", "test": self.shop_is_test, "status": "enabled"})
             return
         routes = {"/v3/payments/": self.payments, "/v3/refunds/": self.refunds}
         for prefix, items in routes.items():
@@ -80,6 +81,10 @@ class Provider(BaseHTTPRequestHandler):
         self.reply(200, value)
 
     def test_command(self, payload):
+        if self.path == "/test/shop-mode":
+            Provider.shop_is_test = payload["test"]
+            self.reply(200, {})
+            return
         if self.path == "/test/lose-payment-response":
             Provider.fail_next_payment_response = True
             self.reply(200, {})

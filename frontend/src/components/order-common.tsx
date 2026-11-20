@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { useState } from "react";
 import { filePath } from "@/lib/api";
-import type { OrderDetails } from "@/lib/contracts";
-import { calendarDateLabel, dateLabel, days, garmentLabel, money, moscowDateTimeLabel, providerLabels, statusLabels, typeLabels } from "@/lib/format";
+import type { EmbroideryConfiguration, OrderDetails } from "@/lib/contracts";
+import { calendarDateLabel, dateLabel, days, embroideryFrameLabel, embroideryFrameSizeMm, garmentLabel, money, moscowDateTimeLabel, providerLabels, statusLabels, typeLabels } from "@/lib/format";
 import { useTask } from "@/lib/hooks";
 import { Failure, Icon, Picture } from "./ui";
 
@@ -43,6 +43,14 @@ export function OrderAmounts({ details, showDelivery = true }: { details: OrderD
   </dl>;
 }
 
+export function OrderEmbroideryFacts({ embroidery }: { embroidery: EmbroideryConfiguration }) {
+  return <>
+    <div><dt>Размер вышивки</dt><dd>{embroideryFrameLabel(embroideryFrameSizeMm[embroidery.frame])}</dd></div>
+    <div><dt>Фон вышивки</dt><dd>{embroidery.threePhotoBackground ? "Из трёх кадров авто" : "Без фона"}</dd></div>
+    <div><dt>Госномер</dt><dd>{embroidery.licensePlate ? "Включён в стоимость" : "Без госномера"}</dd></div>
+  </>;
+}
+
 export function OrderSummary({ details, sectionId, showAmounts = true, showTracking = true, showDeliveryDays = true, showProductionDays = true, showAcceptance = true }: {
   details: OrderDetails; showAmounts?: boolean; showTracking?: boolean; showDeliveryDays?: boolean; showProductionDays?: boolean;
   showAcceptance?: boolean; sectionId?: string;
@@ -53,6 +61,7 @@ export function OrderSummary({ details, sectionId, showAmounts = true, showTrack
     <dl className="order-facts">
       <div><dt>Изделие</dt><dd>{garmentLabel(order.garment)}</dd></div>
       <div><dt>Размер и цвет</dt><dd>{order.size} · {order.color}</dd></div>
+      {order.embroidery && <OrderEmbroideryFacts embroidery={order.embroidery} />}
       {catalogItem && <div><dt>Артикул</dt><dd>{catalogItem.sku}</dd></div>}
       <div><dt>Email</dt><dd>{order.email}</dd></div>
       {showProductionDays && order.productionDays !== null && <div><dt>Подготовка изделия</dt><dd>{days(order.productionDays)}</dd></div>}

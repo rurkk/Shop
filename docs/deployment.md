@@ -7,7 +7,7 @@
 | Адрес демо | `https://demo.knitsew.ru`. Для показа используем отдельные тома, вымышленные данные заказов, тестовые изображения и почтовые ящики |
 | Почта и платежи демо | [Yandex Cloud Postbox](https://yandex.cloud/ru/docs/postbox/quickstart) для писем, [тестовый магазин ЮKassa](https://yookassa.ru/developers/payment-acceptance/testing-and-going-live/testing) для оплаты |
 
-VPS активен, домен зарегистрирован, DNS проверен. Для первого деплоя подготовьте доступ по SSH, Docker, сертификат и почту. Тестовый магазин ЮKassa можно подключить после запуска демо. [Боевой контур на ATLEX](requirements.md#размещение) и [подготовка к приёму настоящих заказов](legal-launch.md) описаны отдельно.
+Инструкция описывает прежнее демо с тестовыми данными и тестовой ЮKassa. 14 ноября 2026 года VPS переключили на `knitsew.ru`, запись `demo.knitsew.ru` отключили. Для управления текущим сайтом используйте [боевую инструкцию](production-deployment.md).
 
 ## Доступ по SSH
 
@@ -122,7 +122,7 @@ RENEWED_LINEAGE=/etc/letsencrypt/live/demo.knitsew.ru /etc/letsencrypt/renewal-h
 )
 ```
 
-Для демонстрационной сборки используется Arial. Если есть лицензия и оба файла Gotham Pro, способ сборки описан в [README](../README.md#витрина-и-браузерная-проверка). При повторной выкладке сделайте копию данных по разделу ниже **до** переноса файлов нового релиза.
+Для демонстрационной сборки используется Arial. Если есть лицензия и оба файла Gotham Pro, способ сборки описан в [README](../README.md#витрина-и-браузерная-проверка). Перед полным обновлением работающего стенда сделайте [копию данных](#полное-обновление) **до** переноса файлов нового релиза.
 
 ## Окружение и запуск демо
 
@@ -248,6 +248,36 @@ services:
 Проверьте конфигурацию командой `knitsew-demo-compose config --quiet` и примените её командой `knitsew-demo-compose up -d --wait --wait-timeout 120`. Проведите тестовый платёж и проверьте обновление статуса заказа после уведомления от ЮKassa.
 
 ## Обновление, резервные копии и откат
+
+### Обновление только фронтенда
+
+Для правок интерфейса, совместимых с работающим на демо API, достаточно заменить образ `frontend`. Если релиз требует обновления backend, схемы БД или файлов Compose, используйте [полное обновление](#полное-обновление).
+
+На рабочем компьютере выполните этот блок в Bash из корня репозитория. `HEAD` должен указывать на проверенный коммит для выкладки. `git archive` берёт файлы фронтенда из этого коммита.
+
+```bash
+(
+    set -euo pipefail
+    release=$(git rev-parse --short=12 HEAD)
+    git archive "${release}:frontend" |
+        docker buildx build --platform linux/amd64 --load -t "shop-frontend:$release" -
+    docker image save --platform linux/amd64 "shop-frontend:$release" | gzip -1 |
+        ssh -T -o BatchMode=yes -o StrictHostKeyChecking=yes knitsew-demo 'docker load'
+    printf 'Тег фронтенда: %s\n' "$release"
+)
+```
+
+Подключитесь к VPS через `ssh knitsew-demo`. Запишите прежнее значение `SHOP_FRONTEND_IMAGE` из `/opt/knitsew-demo/.env.demo` и сохраните старый образ на VPS для отката. В том же файле укажите новое значение `SHOP_FRONTEND_IMAGE=shop-frontend:<тег сборки>`. Затем выполните команды.
+
+```sh
+knitsew-demo-compose config --quiet &&
+    knitsew-demo-compose up -d --no-deps --no-build --pull never --wait --wait-timeout 90 frontend &&
+    knitsew-demo-compose ps frontend
+```
+
+Откройте [демостенд](https://demo.knitsew.ru/) в браузере и проверьте изменённую страницу. Если контейнер не запустился или проверка выявила ошибку, верните прежнее значение `SHOP_FRONTEND_IMAGE` в `.env.demo` и повторите команды Compose.
+
+### Полное обновление
 
 Сохраните тег текущего рабочего релиза и копию `.env.demo` в защищённом хранилище. Перед обновлением сделайте согласованную копию БД и файлов. На время копирования остановите Nginx, backend и SeaweedFS. PostgreSQL продолжает работать, чтобы выполнить `pg_dump`.
 

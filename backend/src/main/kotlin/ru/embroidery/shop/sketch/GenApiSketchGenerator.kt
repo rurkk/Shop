@@ -45,15 +45,20 @@ internal class GenApiSketchGenerator internal constructor(
 
     override fun generate(request: SketchGenerationRequest): List<SketchVariant> {
         val configuration = currentConfiguration()
-        val references = (listOfNotNull(request.revision?.previousSketch) + request.sourcePhotos).map(::dataUri)
+        val references = buildList {
+            add(request.mockup.template)
+            add(request.mockup.guide)
+            request.revision?.let { add(it.previousSketch) }
+            addAll(request.sourcePhotos)
+        }.map(::dataUri)
         val prompts = plan(request, configuration)
         val ids = prompts.map { prompt ->
             val response = post(apiHost, "/api/v1/networks/flux-2", mapOf(
                 "model" to configuration.selection.imageModel,
-                "prompt" to prompt,
+                "prompt" to imageInstructions(prompt, request),
                 "image_urls" to references,
-                "width" to 1024,
-                "height" to 1024,
+                "width" to SKETCH_IMAGE_SIZE,
+                "height" to SKETCH_IMAGE_SIZE,
                 "num_images" to 1,
                 "output_format" to "png",
                 "enable_safety_checker" to true,
@@ -176,6 +181,20 @@ internal class GenApiSketchGenerator internal constructor(
             }
             text("Данные текущего заказа:")
         }
+        val mockup = request.mockup
+        text("Изделие заказа: ${mockup.garment}, размер одежды ${mockup.size}, цвет ${mockup.color}.")
+        text("Согласованное размещение: ${mockup.placement.side}. Размер вышивки: " +
+            "${mockup.placement.embroideryWidthMm} × ${mockup.placement.embroideryHeightMm} мм. " +
+            "Измеренная панель: ${mockup.placement.panelWidthMm} × ${mockup.placement.panelHeightMm} мм. " +
+            "Размер и положение уже рассчитаны в отдельной направляющей рамке для FLUX.2.")
+        val frameSize = request.embroidery.frame.sizeMm
+        text("Выбранная рамка вышивки: $frameSize × $frameSize мм.")
+        text(if (request.embroidery.threePhotoBackground) {
+            "Фон вышивки: композиция из трёх исходных кадров автомобиля."
+        } else {
+            "Фон вышивки: без отдельной фоновой композиции."
+        })
+        text(if (request.embroidery.licensePlate) "Госномер автомобиля: вышить." else "Госномер автомобиля: не вышивать.")
         request.revision?.let {
             text("Выбранный эскиз для правки:")
             image(it.previousSketch)
@@ -192,9 +211,46 @@ internal class GenApiSketchGenerator internal constructor(
     }
 
     private fun instructions(systemPrompt: String, maxVariants: Int, revision: Boolean): String = systemPrompt + "\n\n" + """
-        ${if (revision) "Первое изображение для генератора — выбранный эскиз. Опиши правку к нему и укажи, что следует сохранить." else ""}
+        Генератор получает чистую заготовку одежды как изображение 1 и направляющую рамку того же размера как изображение 2.
+        Описывай сюжет внутри рамки. Сохраняй тип, цвет, сторону, складки, ракурс и фон заготовки.
+        Согласованные размеры учтены в рамке. Исключи из промпта числовые габариты, подписи, линейки и размерные стрелки.
+        Соблюдай выбранные в заказе параметры фона вышивки и госномера. Эти параметры действуют и при правках и имеют приоритет над описанием и перепиской.
+        Если заказан фон из трёх кадров, опиши композицию внутри вышитого мотива по всем трём исходным кадрам автомобиля.
+        Если заказан госномер, используй только явно указанный или разборчивый на исходных фото номер. Не придумывай символы.
+        ${if (revision) "Изображение 3 — выбранный эскиз. Используй его только как образец вышитого мотива и опиши требуемые правки." else ""}
         Верни только JSON-объект с полем "prompts", содержащим от 1 до $maxVariants строк длиной до 3000 символов.
     """.trimIndent()
+
+    private fun imageInstructions(prompt: String, request: SketchGenerationRequest): String {
+        val revision = request.revision != null
+        val sourceImages = if (revision) "Images 4 onward" else "Images 3 onward"
+        val background = if (request.embroidery.threePhotoBackground) {
+            "$sourceImages are the three source photos. Compose the embroidered background from all three reference frames of the car, within the embroidery only."
+        } else {
+            "$sourceImages supply the reference subject. Embroider the subject without adding a separate background composition."
+        }
+        val plate = if (request.embroidery.licensePlate) {
+            "Include the car registration plate only when its text is clearly legible in the source photos or supplied explicitly. Do not invent any characters."
+        } else {
+            "Omit any car registration plate lettering, even if it appears in the references."
+        }
+        return """
+            Edit Image 1, the exact clean garment photograph. Preserve its clothing type, color, side,
+            fold, outline, texture, crop, lighting and background. Add only the requested embroidery.
+            Image 2 is a separate full-canvas placement guide. Its rectangle gives the exact placement and
+            maximum bounds on Image 1. Place the entire embroidered motif inside that rectangle.
+            ${if (revision) "Image 3 supplies only the previous embroidery motif. Apply the requested changes within the guide." else ""}
+            $background
+            $plate
+            These choices take precedence over any conflicting description of the motif below.
+
+            $prompt
+
+            Return a clean product photo. The guide and its outline must never appear in the result.
+            No frames, measurement markings, rulers, labels or annotation overlays.
+            The only permitted lettering is explicitly requested embroidery inside the motif.
+        """.trimIndent()
+    }
 
     private companion object {
         const val MAX_JSON_BYTES = 1024 * 1024

@@ -26,3 +26,7 @@ services:
       context: ./infra/tests
     command: ["python3", "/genapi_sketch_stub.py"]
     networks: [edge]
+
+  nginx:
+    volumes:
+      - ./infra/tests/nginx-test.conf:/etc/nginx/conf.d/00-test-rate-limits.conf:ro

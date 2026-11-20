@@ -30,18 +30,25 @@ class OrderRepository(private val db: JdbcClient) {
             trackingNumber = rs.getString("tracking_number"),
             rejectionReason = rs.getString("rejection_reason"),
             cancellationReason = rs.getString("cancellation_reason"),
-            createdAt = rs.getObject("created_at", OffsetDateTime::class.java)
+            createdAt = rs.getObject("created_at", OffsetDateTime::class.java),
+            embroidery = rs.getString("embroidery_frame")?.let {
+                EmbroideryConfiguration(EmbroideryFrame.valueOf(it), rs.getBoolean("three_photo_background"), rs.getBoolean("license_plate"))
+            },
         )
     }
 
-    fun createCustomDraft(email: String, input: NewDraft): UUID {
+    fun createCustomDraft(email: String, input: NewDraft, itemKopecks: Long?): UUID {
         val id = UUID.randomUUID()
         db.sql("""
-            INSERT INTO orders (id, email, garment, garment_size, color, description, order_type, status)
-            VALUES (:id, :email, :garment, :size, :color, :description, 'CUSTOM_PHOTO', 'DRAFT')
+            INSERT INTO orders (id, email, garment, garment_size, color, description,
+                embroidery_frame, three_photo_background, license_plate, item_kopecks, order_type, status)
+            VALUES (:id, :email, :garment, :size, :color, :description,
+                :frame, :threePhotoBackground, :licensePlate, :itemKopecks, 'CUSTOM_PHOTO', 'DRAFT')
         """).param("id", id).param("email", email).param("garment", input.garment.name)
             .param("size", input.size.trim()).param("color", input.color.trim())
-            .param("description", input.description.trim()).update()
+            .param("description", input.description.trim())
+            .param("frame", input.embroidery.frame.name).param("threePhotoBackground", input.embroidery.threePhotoBackground)
+            .param("licensePlate", input.embroidery.licensePlate).param("itemKopecks", itemKopecks, Types.BIGINT).update()
         return id
     }
 
@@ -106,12 +113,12 @@ class OrderRepository(private val db: JdbcClient) {
             .param("id", id).param("status", status.name).update()
     }
 
-    fun setQuote(id: UUID, quote: Quote) {
+    fun setQuote(id: UUID, itemKopecks: Long, productionDays: Int) {
         db.sql("""
             UPDATE orders SET item_kopecks = :amount, production_days = :days,
                               status = 'AWAITING_DELIVERY_QUOTE', updated_at = now()
             WHERE id = :id
-        """).param("id", id).param("amount", quote.itemKopecks).param("days", quote.productionDays).update()
+        """).param("id", id).param("amount", itemKopecks).param("days", productionDays).update()
     }
 
     fun reject(id: UUID, reason: String) {

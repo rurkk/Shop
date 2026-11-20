@@ -29,6 +29,7 @@ import ru.embroidery.shop.files.FilePurpose
 import ru.embroidery.shop.files.ImageStorage
 import ru.embroidery.shop.files.OrderFile
 import ru.embroidery.shop.files.OrderFileRepository
+import ru.embroidery.shop.order.BACKGROUND_PHOTO_COUNT
 import ru.embroidery.shop.order.Order
 import ru.embroidery.shop.order.OrderDeliveryRepository
 import ru.embroidery.shop.order.OrderRepository
@@ -49,6 +50,7 @@ internal class OrderSketchGeneration(
     private val jobs: SketchJobs,
     private val files: OrderFileRepository,
     private val images: ImageStorage,
+    private val templates: SketchGarmentTemplates,
     private val transaction: TransactionTemplate,
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
@@ -61,15 +63,25 @@ internal class OrderSketchGeneration(
 
     @Transactional
     fun start(actor: Actor, orderId: UUID, input: StartSketchJob): SketchJobSummary {
-        orders.lock(orderId).requireSketchStage()
+        val order = orders.lock(orderId)
+        order.requireSketchStage()
+        val embroidery = order.requireEmbroidery()
+        if (maxOf(input.placement.embroideryWidthMm, input.placement.embroideryHeightMm) > embroidery.frame.sizeMm) {
+            badRequest("Embroidery must fit the selected frame")
+        }
         val feedback = input.feedback?.trim()
         val previous = input.previousFileId
         if ((previous == null) != (feedback == null) || feedback?.isEmpty() == true) {
             badRequest("Choose a sketch and enter revision feedback together")
         }
         if (previous != null && !jobs.hasVariant(orderId, previous)) badRequest("Sketch variant not found")
-        if (orders.sources(orderId).isEmpty()) conflict("An order source photo is required")
+        val sources = orders.sources(orderId)
+        if (sources.isEmpty()) conflict("An order source photo is required")
+        if (embroidery.threePhotoBackground && sources.size != BACKGROUND_PHOTO_COUNT) {
+            conflict("Three source photos are required for the selected background")
+        }
         if (generators.ifAvailable == null) throw ApiFailure(HttpStatus.SERVICE_UNAVAILABLE, "Sketch generation is unavailable")
+        templates.validate(order, input.placement)
         return jobs.enqueue(orderId, actor.email, messages.lastSequence(orderId), input.copy(feedback = feedback))
             ?: conflict("Sketch generation is already active for this order")
     }
@@ -119,6 +131,8 @@ internal class OrderSketchGeneration(
             orderDescription = order.description?.let(redactor::removeContacts),
             conversation = conversation.map { SketchMessage(it.senderRole, redactor.removeContacts(it.body), it.attachmentId?.let(::image)) },
             sourcePhotos = orders.sources(job.orderId).map(::image),
+            mockup = templates.prepare(order, job.placement),
+            embroidery = order.requireEmbroidery(),
             maxVariants = job.maxVariants,
             revision = job.previousFileId?.let { SketchRevision(image(it), redactor.removeContacts(requireNotNull(job.feedback))) },
         )

@@ -1,6 +1,8 @@
 package ru.embroidery.shop.sketch
 
 import ru.embroidery.shop.auth.Role
+import ru.embroidery.shop.order.BACKGROUND_PHOTO_COUNT
+import ru.embroidery.shop.order.EmbroideryConfiguration
 
 /** Generates previews for staff review. Implementations own the provider call and never publish sketches. */
 internal interface SketchGenerator {
@@ -17,11 +19,16 @@ internal data class SketchGenerationRequest(
     /** All messages in ascending order, with unrelated personal data removed by the caller. */
     val conversation: List<SketchMessage>,
     val sourcePhotos: List<SketchImage>,
+    val mockup: SketchMockup,
+    val embroidery: EmbroideryConfiguration,
     val maxVariants: Int = 1,
     val revision: SketchRevision? = null,
 ) {
     init {
         require(sourcePhotos.isNotEmpty()) { "At least one source photo is required" }
+        require(!embroidery.threePhotoBackground || sourcePhotos.size == BACKGROUND_PHOTO_COUNT) {
+            "Three source photos are required for the selected background"
+        }
         require(maxVariants > 0) { "At least one variant must be allowed" }
     }
 }

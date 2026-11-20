@@ -1,5 +1,6 @@
 package ru.embroidery.shop.sketch
 
+import jakarta.validation.Valid
 import jakarta.validation.constraints.Max
 import jakarta.validation.constraints.Min
 import jakarta.validation.constraints.Size
@@ -13,6 +14,7 @@ import java.util.UUID
 internal enum class SketchJobStatus { QUEUED, RUNNING, SUCCEEDED, FAILED }
 
 internal data class StartSketchJob(
+    @field:Valid val placement: SketchPlacement,
     @field:Min(1) @field:Max(3) val maxVariants: Int = 1,
     val previousFileId: UUID? = null,
     @field:Size(max = 2000) val feedback: String? = null,
@@ -47,6 +49,7 @@ internal data class ClaimedSketchJob(
     val maxVariants: Int,
     val previousFileId: UUID?,
     val feedback: String?,
+    val placement: SketchPlacement,
 )
 
 @Repository
@@ -84,13 +87,19 @@ internal class SketchJobs(private val db: JdbcClient) {
     fun enqueue(orderId: UUID, staff: String, throughSequence: Long, input: StartSketchJob): SketchJobSummary? =
         db.sql("""
             INSERT INTO sketch_generation_jobs
-                (id, order_id, requested_by, through_sequence, max_variants, previous_file_id, feedback, status)
-            VALUES (:id, :order, :staff, :sequence, :variants, :previous, :feedback, 'QUEUED')
+                (id, order_id, requested_by, through_sequence, max_variants, previous_file_id, feedback, status,
+                 garment_side, panel_width_mm, panel_height_mm, embroidery_width_mm, embroidery_height_mm)
+            VALUES (:id, :order, :staff, :sequence, :variants, :previous, :feedback, 'QUEUED',
+                    :side, :panelWidth, :panelHeight, :embroideryWidth, :embroideryHeight)
             ON CONFLICT (order_id) WHERE status IN ('QUEUED', 'RUNNING') DO NOTHING
             RETURNING id, status, created_at, failure
         """).param("id", UUID.randomUUID()).param("order", orderId).param("staff", staff)
             .param("sequence", throughSequence).param("variants", input.maxVariants)
             .param("previous", input.previousFileId, Types.OTHER).param("feedback", input.feedback, Types.VARCHAR)
+            .param("side", input.placement.side.name)
+            .param("panelWidth", input.placement.panelWidthMm).param("panelHeight", input.placement.panelHeightMm)
+            .param("embroideryWidth", input.placement.embroideryWidthMm)
+            .param("embroideryHeight", input.placement.embroideryHeightMm)
             .query(summaryMapper).optional().orElse(null)
 
     fun claim(): ClaimedSketchJob? = db.sql("""
@@ -100,12 +109,18 @@ internal class SketchJobs(private val db: JdbcClient) {
         )
         UPDATE sketch_generation_jobs j SET status = 'RUNNING', started_at = now()
         FROM next WHERE j.id = next.id
-        RETURNING j.id, j.order_id, j.requested_by, j.through_sequence, j.max_variants, j.previous_file_id, j.feedback
+        RETURNING j.id, j.order_id, j.requested_by, j.through_sequence, j.max_variants, j.previous_file_id, j.feedback,
+                  j.garment_side, j.panel_width_mm, j.panel_height_mm, j.embroidery_width_mm, j.embroidery_height_mm
     """).query { rs, _ ->
         ClaimedSketchJob(
             rs.getObject("id", UUID::class.java), rs.getObject("order_id", UUID::class.java),
             rs.getString("requested_by"), rs.getLong("through_sequence"), rs.getInt("max_variants"),
             rs.getObject("previous_file_id", UUID::class.java), rs.getString("feedback"),
+            SketchPlacement(
+                GarmentSide.valueOf(rs.getString("garment_side")),
+                rs.getInt("panel_width_mm"), rs.getInt("panel_height_mm"),
+                rs.getInt("embroidery_width_mm"), rs.getInt("embroidery_height_mm"),
+            ),
         )
     }.optional().orElse(null)
 

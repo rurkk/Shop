@@ -276,11 +276,23 @@ test("покупатель и менеджер проводят заказ от 
     await page.getByRole("button", { name: "Выбрать фото", exact: true }).click();
     await (await chooser).setFiles(image("coupe-source"));
     await expect(page.getByRole("img", { name: "Выбранное фото", exact: true })).toBeVisible();
-    await expect(page.getByText(/от 4 100 ₽ за изделие с вышивкой/)).toBeVisible();
     await page.getByRole("combobox", { name: "Изделие" }).selectOption("HOODIE");
-    await page.getByRole("combobox", { name: "Размер" }).selectOption("M");
+    await page.getByRole("combobox", { name: "Размер одежды", exact: true }).selectOption("M");
     await page.getByRole("combobox", { name: "Цвет" }).selectOption("Чёрный");
+    const background = page.getByRole("checkbox", { name: "Фон из трёх кадров авто", exact: true });
+    await page.getByRole("radio", { name: "16 × 16 см", exact: true }).check();
+    await expect(background).toHaveCount(0);
+    await page.getByRole("radio", { name: "22 × 22 см", exact: true }).check();
+    await background.check();
+    await page.getByRole("checkbox", { name: "Вышить госномер", exact: true }).check();
+    await expect(page.getByText(/^9\s*900\s*₽$/).first()).toBeVisible();
+    await page.getByRole("combobox", { name: "Изделие" }).selectOption("T_SHIRT");
+    await expect(page.getByText(/^8\s*900\s*₽$/).first()).toBeVisible();
+    await page.getByRole("combobox", { name: "Изделие" }).selectOption("HOODIE");
+    await expect(background).toBeChecked();
+    await expect(page.getByText(/^9\s*900\s*₽$/).first()).toBeVisible();
     await page.getByRole("textbox", { name: /Пожелания/ }).fill("Вышивка на груди");
+    await assertNoOverflow(page);
   } else {
     await page.goto("/catalog/rus");
     await page.getByRole("button", { name: /Худи «Воля»/ }).click();
@@ -319,6 +331,19 @@ test("покупатель и менеджер проводят заказ от 
     await page.reload();
     await expect(preview).toBeVisible();
     await expect(preview).not.toHaveAttribute("src", original!);
+    const submit = page.getByRole("button", { name: "Получить оценку", exact: true });
+    for (const [number, name] of [[2, "coupe-source"], [3, "coupe-detail"]] as const) {
+      await expect(submit).toBeDisabled();
+      const addPhoto = page.waitForEvent("filechooser");
+      await page.getByRole("button", { name: "Загрузить фото", exact: true }).click();
+      await (await addPhoto).setFiles(image(name));
+      await expect(page.getByRole("img", { name: `Исходное фото ${number}`, exact: true })).toBeVisible();
+    }
+    const draft = await (await page.request.get("/api" + new URL(orderURL).pathname)).json();
+    expect(draft.order).toMatchObject({
+      embroidery: { frame: "LARGE", threePhotoBackground: true, licensePlate: true },
+      itemKopecks: 990000,
+    });
   } else {
     const editDelivery = page.getByRole("button", { name: "Изменить", exact: true });
     await expect(editDelivery).toBeVisible();
@@ -364,7 +389,8 @@ test("покупатель и менеджер проводят заказ от 
     if (mobile) {
       const quote = staff.locator("details").filter({ has: staff.getByText("Оценить изделие", { exact: true }) });
       await quote.locator("summary").click();
-      await quote.getByRole("textbox", { name: "Цена изделия, ₽" }).fill("4100");
+      await expect(quote.getByRole("textbox", { name: "Цена изделия, ₽" })).toHaveCount(0);
+      await expect(quote.getByText(/9\s*900\s*₽/)).toBeVisible();
       await quote.getByRole("spinbutton", { name: "Срок изготовления, дни" }).fill("7");
       await quote.getByRole("button", { name: "Сохранить оценку" }).click();
       await expect(staff.getByText("Расчёт доставки", { exact: true })).toBeVisible();
@@ -378,7 +404,7 @@ test("покупатель и менеджер проводят заказ от 
       expect(quoteLink).toBe(orderURL);
       await page.goto(quoteLink!);
       await expect(page.getByRole("heading", { name: "Оценка вышивки" })).toBeVisible();
-      await expect(page.getByText(/4\s*100\s*₽/).first()).toBeInViewport();
+      await expect(page.getByText(/9\s*900\s*₽/).first()).toBeInViewport();
       await page.getByRole("button", { name: "Указать пункт выдачи" }).click();
       await fillDelivery(page);
       await page.getByRole("button", { name: "Сохранить доставку" }).click();
@@ -387,7 +413,13 @@ test("покупатель и менеджер проводят заказ от 
     }
     await quoteDelivery(staff);
     await page.getByRole("button", { name: "Обновить заказ" }).click();
-    await pay(page, mobile ? /4\s*450,50\s*₽/ : /7\s*250,50\s*₽/, mobile ? "Готовим эскиз" : "Готовим изделие");
+    if (mobile) {
+      const terms = page.locator('dl[aria-label="Условия заказа"]');
+      await expect(terms.getByText("22 × 22 см", { exact: true })).toBeVisible();
+      await expect(terms.getByText("Из трёх кадров авто", { exact: true })).toBeVisible();
+      await expect(terms.getByText("Включён в стоимость", { exact: true })).toBeVisible();
+    }
+    await pay(page, mobile ? /10\s*250,50\s*₽/ : /7\s*250,50\s*₽/, mobile ? "Готовим эскиз" : "Готовим изделие");
 
     if (mobile) {
       await staff.getByRole("textbox", { name: "Сообщение" }).fill("Пример размещения вышивки");
@@ -413,6 +445,11 @@ test("покупатель и менеджер проводят заказ от 
       const generation = staff.getByRole("region", { name: "Эскизы с ИИ" });
       await staff.getByRole("navigation", { name: "Разделы заказа" }).getByRole("link", { name: "Эскизы заказа" }).click();
       await expect(generation.getByRole("heading", { name: "Эскизы с ИИ" })).toBeInViewport();
+      await generation.getByLabel("Сторона изделия").selectOption("FRONT");
+      await generation.getByLabel("Ширина панели, см").fill("48");
+      await generation.getByLabel("Высота панели, см").fill("40");
+      await expect(generation.getByLabel("Ширина вышивки, см")).toHaveValue("22");
+      await expect(generation.getByLabel("Высота вышивки, см")).toHaveValue("22");
       const variantLimit = generation.getByLabel("Максимум вариантов");
       const generate = generation.getByRole("button", { name: "Сгенерировать эскиз", exact: true });
       await variantLimit.selectOption("2");

@@ -4,23 +4,22 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { read, upload, write } from "@/lib/api";
-import type { OrderDetails, Variant } from "@/lib/contracts";
-import { garmentLabels, money } from "@/lib/format";
+import type { OrderDetails, PhotoOrderOption, Variant } from "@/lib/contracts";
+import { money } from "@/lib/format";
 import { useTask } from "@/lib/hooks";
 import { AccessCodeForm, ResendWait, useAccessCode } from "./access";
 import { CheckoutPhoto } from "./checkout-photo";
 import { DeliveryFields, deliveryFrom } from "./delivery-fields";
+import { PhotoOrderConfiguration } from "./photo-order-configuration";
 import { PrivacyLink } from "./privacy-link";
 import { Failure, Icon, Pending } from "./ui";
 
 type Selection = { catalogSlug: string; productName: string; variant: Variant };
 type Draft = { id: string; requestKey: string; selectionId?: string; email: string; requestedAt?: number };
-const sizes = ["XS", "S", "M", "L", "XL", "XXL"];
-const colors = ["Чёрный", "Белый", "Молочный", "Серый", "Бордовый"];
 
-export function Checkout({ selection, active = true, onBusyChange }: {
-  selection?: Selection; active?: boolean; onBusyChange?: (busy: boolean) => void;
-}) {
+export function Checkout({ selection, photoOptions, active = true, onBusyChange }: (
+  { selection: Selection; photoOptions?: never } | { selection?: never; photoOptions: PhotoOrderOption[] }
+) & { active?: boolean; onBusyChange?: (busy: boolean) => void }) {
   const [email, setEmail] = useState("");
   const [draft, setDraft] = useState<Draft>();
   const [verifiedDraft, setVerifiedDraft] = useState<string>();
@@ -48,7 +47,15 @@ export function Checkout({ selection, active = true, onBusyChange }: {
     void request.run(async () => {
       const payload = selection
         ? { email: access.address, catalogSlug: selection.catalogSlug, variantId: selection.variant.id, delivery: deliveryFrom(data) }
-        : { email: access.address, garment: data.get("garment"), size: data.get("size"), color: data.get("color"), description: String(data.get("description")).trim() };
+        : {
+          email: access.address, garment: data.get("garment"), size: data.get("size"), color: data.get("color"),
+          description: String(data.get("description")).trim(),
+          embroidery: {
+            frame: data.get("embroideryFrame"),
+            threePhotoBackground: data.has("threePhotoBackground"),
+            licensePlate: data.has("licensePlate"),
+          },
+        };
       const requestKey = JSON.stringify(payload);
       let nextDraft: Draft;
       if (currentDraft?.requestKey === requestKey) {
@@ -96,14 +103,9 @@ export function Checkout({ selection, active = true, onBusyChange }: {
         submit(new FormData(event.currentTarget));
       }}>
         <fieldset className="stack" disabled={request.busy}>
-          {!selection && <>
+          {photoOptions && <>
             <CheckoutPhoto file={file} onChange={setFile} />
-            <label className="field">Изделие <select name="garment" defaultValue="" required><option value="" disabled>Выберите изделие</option>
-              {Object.entries(garmentLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-            <div className="field-row">
-              <label className="field">Размер <select name="size" defaultValue="" required><option value="" disabled>Выберите размер</option>{sizes.map((size) => <option key={size}>{size}</option>)}</select></label>
-              <label className="field">Цвет <select name="color" defaultValue="" required><option value="" disabled>Выберите цвет</option>{colors.map((color) => <option key={color}>{color}</option>)}</select></label>
-            </div>
+            <PhotoOrderConfiguration options={photoOptions} />
             <label className="field">Пожелания к вышивке <span className="optional">необязательно</span>
               <textarea name="description" maxLength={2000} rows={3} placeholder="Что важно сохранить на фото? Где разместить вышивку?" />
             </label>

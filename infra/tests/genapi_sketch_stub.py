@@ -1,6 +1,7 @@
 """Generate synthetic PNGs for the local sketch workflow test."""
 
 import json
+import re
 import struct
 import zlib
 from itertools import count
@@ -57,8 +58,11 @@ class Handler(BaseHTTPRequestHandler):
             assert "Сотрудник: Здравствуйте" in texts
             assert "Покупатель: Спасибо" in texts
             assert "Покупатель: Для эскиза оставьте контур, связь: [скрыто]" in texts
-        revision = texts[0] == "Выбранный эскиз для правки:"
-        assert len(images) == (3 if revision else 2)
+        assert "Выбранная рамка вышивки: 220 × 220 мм." in texts
+        assert "Фон вышивки: композиция из трёх исходных кадров автомобиля." in texts
+        assert "Госномер автомобиля: вышить." in texts
+        revision = "Выбранный эскиз для правки:" in texts
+        assert len(images) == (5 if revision else 4)
         if revision:
             assert images[0] not in images[1:]
             assert texts[-1] == "Замечания сотрудника к выбранному эскизу: Оставьте только контур"
@@ -70,16 +74,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json({"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"prompts": prompts})}}]})
 
     def generate(self, request):
-        model, action, *indexes = request["prompt"].split()
-        assert request["model"] == model
+        prompt = request["prompt"]
+        expected = re.search(r"(?m)^(standard|flash) (edit|draft (\d+))$", prompt)
+        assert expected and request["model"] == expected[1]
+        revision = expected[2] == "edit"
+        assert "Compose the embroidered background from all three reference frames of the car" in prompt
+        assert "Include the car registration plate only when its text is clearly legible" in prompt
         references = request["image_urls"]
-        assert len(references) == (2 if action == "edit" else 1)
+        assert len(references) == (6 if revision else 5)
+        assert references[0].startswith("data:image/jpeg;") and references[1].startswith("data:image/png;")
         assert all(image.startswith("data:image/") for image in references)
         assert request["num_images"] == 1
         assert request["output_format"] == "png"
         assert request["enable_safety_checker"] is True
         request_id = next(self.ids)
-        self.images[request_id] = png(120 if action == "edit" else 60 + int(indexes[0]))
+        self.images[request_id] = png(120 if revision else 60 + int(expected[3]))
         self.send_json({"request_id": request_id, "model": "flux-2", "status": "processing"})
 
     def do_GET(self):
